@@ -25,6 +25,14 @@ CREATE TABLE users (
   created_at              TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE user_wallet_keys (
+  public_key TEXT PRIMARY KEY,
+  user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  retired_at TIMESTAMPTZ
+);
+CREATE INDEX ON user_wallet_keys (user_id);
+
 CREATE TABLE campaigns (
   id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   creator_id          UUID NOT NULL REFERENCES users(id),

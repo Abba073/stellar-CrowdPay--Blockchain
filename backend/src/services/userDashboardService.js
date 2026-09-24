@@ -28,7 +28,7 @@ async function listUserContributions(userId) {
   );
   if (!userRows.length) return null;
 
-  const senderPublicKey = userRows[0].wallet_public_key;
+  // Current key plus every past key, so history survives wallet rotation.
   const { rows } = await db.query(
     `SELECT ctr.id, ctr.amount, ctr.asset, ctr.anchor_id, ctr.anchor_transaction_id,
             ctr.source_amount, ctr.source_asset, ctr.conversion_rate, ctr.payment_type,
@@ -37,9 +37,10 @@ async function listUserContributions(userId) {
             c.target_amount, c.raised_amount
      FROM contributions ctr
      JOIN campaigns c ON c.id = ctr.campaign_id
-     WHERE ctr.sender_public_key = $1
+     WHERE ctr.sender_public_key = $2
+        OR ctr.sender_public_key IN (SELECT public_key FROM user_wallet_keys WHERE user_id = $1)
      ORDER BY ctr.created_at DESC`,
-    [senderPublicKey]
+    [userId, userRows[0].wallet_public_key]
   );
   return rows;
 }

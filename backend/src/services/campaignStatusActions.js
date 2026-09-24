@@ -68,6 +68,7 @@ async function loadContributorRecipients(campaignId) {
     `SELECT DISTINCT ON (u.id) u.id, u.email, u.name
      FROM contributions c
      JOIN users u ON u.wallet_public_key = c.sender_public_key
+        OR u.id IN (SELECT user_id FROM user_wallet_keys WHERE public_key = c.sender_public_key)
      WHERE c.campaign_id = $1
        AND u.email IS NOT NULL
      ORDER BY u.id, c.created_at ASC`,
@@ -99,7 +100,11 @@ async function syncSorobanStatus(campaign) {
       contract_id: campaign.escrow_contract_id,
       status: campaign.status,
     });
+    await db.query("UPDATE campaigns SET soroban_status = 'verified' WHERE id = $1", [campaign.id]);
   } catch (err) {
+    await db
+      .query("UPDATE campaigns SET soroban_status = 'failed' WHERE id = $1", [campaign.id])
+      .catch(() => {});
     logger.error('Soroban escrow verification failed after status transition', {
       campaign_id: campaign.id,
       contract_id: campaign.escrow_contract_id,
@@ -280,7 +285,13 @@ async function queueFailedCampaignRefunds(campaignId, actorUserId) {
   const campaign = campaigns[0];
 
   const { rows: contributions } = await db.query(
-    `SELECT c.*
+    `SELECT c.*,
+            COALESCE(
+              (SELECT u.wallet_public_key FROM user_wallet_keys k
+                 JOIN users u ON u.id = k.user_id
+                WHERE k.public_key = c.sender_public_key),
+              c.sender_public_key
+            ) AS refund_destination_key
        FROM contributions c
        WHERE c.campaign_id = $1
          AND NOT EXISTS (
@@ -302,7 +313,7 @@ async function queueFailedCampaignRefunds(campaignId, actorUserId) {
     for (const contribution of contributions) {
       const unsignedXdr = await buildWithdrawalTransaction({
         campaignWalletPublicKey: campaign.wallet_public_key,
-        destinationPublicKey: contribution.sender_public_key,
+        destinationPublicKey: contribution.refund_destination_key || contribution.sender_public_key,
         amount: contribution.amount,
         asset: contribution.asset,
       });
@@ -317,7 +328,7 @@ async function queueFailedCampaignRefunds(campaignId, actorUserId) {
           campaignId,
           actorUserId || refundActorUserId(campaign.creator_id),
           contribution.amount,
-          contribution.sender_public_key,
+          contribution.refund_destination_key || contribution.sender_public_key,
           unsignedXdr,
           contribution.id,
         ]
