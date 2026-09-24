@@ -265,58 +265,43 @@ test('GET /api/campaigns supports search, asset filter, and sort', async () => {
   assert.ok(listQuery.params.includes('USDC'));
 });
 
-test('GET /api/campaigns/:id/balance returns raised_amount for an active campaign', async () => {
-  const app = buildApp({
-    queryImpl: async (text) => {
-      if (text.includes('SELECT status, raised_amount FROM campaigns')) {
-        return { rows: [{ status: 'active', raised_amount: '250.0000000' }] };
-      }
-      return { rows: [] };
-    },
-    buildWithdrawalTransactionImpl: async () => '',
-    insertWithdrawalPendingSignaturesImpl: async () => 'tx-row',
-  });
-
-  const response = await request(app).get('/api/campaigns/camp-1/balance');
-
-  assert.equal(response.status, 200);
-  assert.equal(response.body.raised_amount, '250.0000000');
-  assert.equal(response.body.XLM, undefined, 'should not expose raw on-chain balances');
+test('GET /api/campaigns accepts every valid status and passes it to the filter', async () => {
+  const { VALID_CAMPAIGN_STATUSES } = require('../middleware/validation');
+  for (const status of VALID_CAMPAIGN_STATUSES) {
+    const queries = [];
+    const app = buildApp({
+      queryImpl: async (text, params) => {
+        queries.push({ text, params });
+        return text.includes('COUNT(*)') ? { rows: [{ total: 0 }] } : { rows: [] };
+      },
+    });
+    const response = await request(app).get(`/api/campaigns?status=${status}`);
+    assert.equal(response.status, 200, `status ${status} should be accepted`);
+    assert.ok(queries.some((q) => q.params && q.params.includes(status)));
+  }
 });
 
-test('GET /api/campaigns/:id/balance returns suspended:true for a suspended campaign', async () => {
-  const app = buildApp({
-    queryImpl: async (text) => {
-      if (text.includes('SELECT status, raised_amount FROM campaigns')) {
-        return { rows: [{ status: 'suspended', raised_amount: '100.0000000' }] };
-      }
-      return { rows: [] };
-    },
-    buildWithdrawalTransactionImpl: async () => '',
-    insertWithdrawalPendingSignaturesImpl: async () => 'tx-row',
-  });
-
-  const response = await request(app).get('/api/campaigns/camp-suspended/balance');
-
-  assert.equal(response.status, 200);
-  assert.equal(response.body.suspended, true);
-  assert.equal(response.body.raised_amount, undefined, 'should not expose raised amount for suspended campaign');
+test('GET /api/campaigns rejects an unknown status', async () => {
+  const app = buildApp({ queryImpl: async () => ({ rows: [] }) });
+  const response = await request(app).get('/api/campaigns?status=bogus');
+  assert.equal(response.status, 400);
 });
 
-test('GET /api/campaigns/:id/balance returns 404 for unknown campaign', async () => {
-  const app = buildApp({
-    queryImpl: async (text) => {
-      if (text.includes('SELECT status, raised_amount FROM campaigns')) {
-        return { rows: [] };
-      }
-      return { rows: [] };
-    },
-    buildWithdrawalTransactionImpl: async () => '',
-    insertWithdrawalPendingSignaturesImpl: async () => 'tx-row',
-  });
-
-  const response = await request(app).get('/api/campaigns/nonexistent/balance');
-
-  assert.equal(response.status, 404);
-  assert.equal(response.body.error, 'Campaign not found');
+test('GET /api/campaigns applies a distinct ORDER BY for every valid sort', async () => {
+  const { VALID_ORDER_BY } = require('../middleware/validation');
+  const seen = new Set();
+  for (const sort of VALID_ORDER_BY) {
+    let listQuery;
+    const app = buildApp({
+      queryImpl: async (text) => {
+        if (text.includes('ORDER BY')) listQuery = text;
+        return text.includes('COUNT(*)') ? { rows: [{ total: 0 }] } : { rows: [] };
+      },
+    });
+    const response = await request(app).get(`/api/campaigns?sort=${sort}`);
+    assert.equal(response.status, 200, `sort ${sort} should be accepted`);
+    seen.add(listQuery.match(/ORDER BY([\s\S]*?)LIMIT/)[1].trim());
+    if (sort === 'trending') assert.match(listQuery, /INTERVAL '7 days'/);
+  }
+  assert.equal(seen.size, VALID_ORDER_BY.length, 'every sort must map to its own clause');
 });

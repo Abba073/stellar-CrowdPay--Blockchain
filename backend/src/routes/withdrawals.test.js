@@ -19,6 +19,8 @@ function buildApp({ queryImpl, stellarImpl, userId = 'creator-1', role = 'creato
     signTransactionXdr: () => 'xdr-signed',
     signatureCountFromXdr: () => 2,
     submitSignedWithdrawal: async () => 'tx-hash',
+    getTransactionHash: () => 'tx-hash',
+    transactionExistsOnHorizon: async () => false,
     // Default: XDR is not expired. Override in specific tests via stellarImpl.
     isXdrExpired: () => false,
     PLATFORM_PUBLIC_KEY: 'GPLATFORM',
@@ -530,4 +532,90 @@ test('POST /api/withdrawals/:id/approve/platform returns 410 when XDR time bound
   cleanup();
   assert.equal(response.status, 410);
   assert.match(response.body.error, /expired/i);
+});
+
+function approveQueryImpl({ failUpdate = false, state = { status: 'pending' } } = {}) {
+  return async (text) => {
+    if (text === 'BEGIN' || text === 'COMMIT' || text === 'ROLLBACK') return { rows: [] };
+    if (text.includes('SELECT wr.*, c.status')) {
+      return {
+        rows: [{
+          id: 'w-1',
+          status: state.status,
+          creator_signed: true,
+          platform_signed: false,
+          unsigned_xdr: 'xdr',
+          campaign_id: 'camp-1',
+          campaign_status: 'active',
+        }],
+      };
+    }
+    if (text.includes("SET unsigned_xdr = $1, platform_signed = TRUE")) {
+      if (failUpdate) throw new Error('db connection lost');
+      state.status = 'submitted';
+      return { rows: [{ id: 'w-1', status: 'submitted', tx_hash: 'tx-hash', campaign_id: 'camp-1' }] };
+    }
+    return { rows: [] };
+  };
+}
+
+test('approve: DB failure after submission returns 500 with tx_hash, retry reconciles without resubmitting', async () => {
+  let submitCalls = 0;
+  let landed = false;
+  const stellarImpl = {
+    submitSignedWithdrawal: async () => {
+      submitCalls += 1;
+      landed = true;
+      return 'tx-hash';
+    },
+    transactionExistsOnHorizon: async () => landed,
+  };
+
+  const first = buildApp({ role: 'admin', queryImpl: approveQueryImpl({ failUpdate: true }), stellarImpl });
+  const r1 = await request(first.app).post('/api/withdrawals/w-1/approve/platform').set('Authorization', 'Bearer t').send({});
+  first.cleanup();
+  assert.equal(r1.status, 500);
+  assert.equal(r1.body.tx_hash, 'tx-hash');
+  assert.equal(submitCalls, 1);
+
+  // Retry: row is still 'pending' in the DB, but the tx is already on Horizon.
+  const second = buildApp({ role: 'admin', queryImpl: approveQueryImpl(), stellarImpl });
+  const r2 = await request(second.app).post('/api/withdrawals/w-1/approve/platform').set('Authorization', 'Bearer t').send({});
+  second.cleanup();
+  assert.equal(r2.status, 200);
+  assert.equal(r2.body.status, 'submitted');
+  assert.equal(r2.body.tx_hash, 'tx-hash');
+  assert.equal(submitCalls, 1, 'retry must not submit a second time');
+});
+
+test('approve: submit error that actually landed on Horizon is reconciled as submitted', async () => {
+  const { app, cleanup } = buildApp({
+    role: 'admin',
+    queryImpl: approveQueryImpl(),
+    stellarImpl: {
+      submitSignedWithdrawal: async () => { throw new Error('timeout'); },
+      transactionExistsOnHorizon: async () => true,
+    },
+  });
+  const res = await request(app).post('/api/withdrawals/w-1/approve/platform').set('Authorization', 'Bearer t').send({});
+  cleanup();
+  assert.equal(res.status, 200);
+  assert.equal(res.body.status, 'submitted');
+});
+
+test('approve: unknown outcome (Horizon lookup fails after submit error) returns 503 and does not mark failed', async () => {
+  const queries = [];
+  const base = approveQueryImpl();
+  const { app, cleanup } = buildApp({
+    role: 'admin',
+    queryImpl: async (text, params) => { queries.push(text); return base(text, params); },
+    stellarImpl: {
+      submitSignedWithdrawal: async () => { throw new Error('timeout'); },
+      transactionExistsOnHorizon: async () => { throw new Error('horizon down'); },
+    },
+  });
+  const res = await request(app).post('/api/withdrawals/w-1/approve/platform').set('Authorization', 'Bearer t').send({});
+  cleanup();
+  assert.equal(res.status, 503);
+  assert.ok(!queries.some((q) => q.includes("SET status = 'failed'")));
 });

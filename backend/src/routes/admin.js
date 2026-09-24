@@ -297,7 +297,8 @@ router.get('/users', async (req, res) => {
     const { rows } = await db.query(
       `SELECT u.id, u.name, u.email, u.role, u.is_admin, u.is_banned, u.created_at,
               (SELECT COUNT(*) FROM campaigns WHERE creator_id = u.id AND deleted_at IS NULL) as campaign_count,
-              (SELECT COUNT(*) FROM contributions WHERE sender_public_key = u.wallet_public_key) as contribution_count
+              (SELECT COUNT(*) FROM contributions WHERE sender_public_key = u.wallet_public_key
+                 OR sender_public_key IN (SELECT public_key FROM user_wallet_keys WHERE user_id = u.id)) as contribution_count
        FROM users u
        ${where}
        ORDER BY u.created_at DESC`,

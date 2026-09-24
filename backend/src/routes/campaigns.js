@@ -249,6 +249,8 @@ router.get('/', getCampaignsValidation, validateRequest, asyncHandler(async (req
     most_funded: 'c.raised_amount DESC',
     most_backed: '(SELECT COUNT(*) FROM contributions ctr WHERE ctr.campaign_id = c.id) DESC',
     closest_to_goal: '(c.raised_amount / NULLIF(c.target_amount, 0)) DESC NULLS LAST, c.raised_amount DESC',
+    trending:
+      "(SELECT COUNT(*) FROM contributions ctr WHERE ctr.campaign_id = c.id AND ctr.created_at >= NOW() - INTERVAL '7 days') DESC, c.created_at DESC",
   };
   const orderBy = sortExpressions[sort] || sortExpressions.newest;
 

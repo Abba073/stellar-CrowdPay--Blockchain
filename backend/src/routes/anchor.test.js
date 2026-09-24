@@ -233,3 +233,49 @@ test('GET /api/anchor/deposits/:id refreshes anchor session status', async () =>
   assert.equal(response.body.anchor_status, 'pending');
   assert.ok(queryCount >= 3);
 });
+
+test('concurrent completed-status polls submit exactly one contribution', async () => {
+  let submitted = 0;
+  let claimed = false;
+  const session = {
+    id: 'deposit-1', user_id: 'user-1', campaign_id: 'camp-1', anchor_id: 'moneygram',
+    anchor_transaction_id: 'anchor-tx', anchor_asset: 'USDC', anchor_amount: '10',
+    contribution_amount: '10', campaign_asset: 'USDC', status: 'pending_anchor',
+    last_anchor_status: 'pending', last_anchor_payload: {}, deposit_type: 'campaign',
+    contribution_tx_hash: null, contribution_id: null,
+    wallet_public_key: 'GUSER', wallet_secret_encrypted: 'encrypted',
+  };
+  const { app } = buildApp({
+    queryImpl: async (text) => {
+      if (text.includes('FROM anchor_deposits ad')) return { rows: [{ ...session }] };
+      if (text.includes('contribution_submitting_at = NOW()')) {
+        // Emulates the atomic conditional UPDATE: only the first caller wins.
+        if (claimed) return { rows: [] };
+        claimed = true;
+        return { rows: [{ id: 'deposit-1' }] };
+      }
+      if (text.includes('FROM campaigns c JOIN users u')) return { rows: [{ id: 'camp-1', status: 'active' }] };
+      if (text.includes('SELECT * FROM anchor_deposits WHERE id = $1')) return { rows: [{ ...session, status: 'contribution_submitted' }] };
+      return { rows: [] };
+    },
+    anchorServiceImpl: {
+      getAnchorById: () => ({ id: 'moneygram', assetCode: 'USDC' }),
+      getAnchorTransaction: async () => ({ transaction: { status: 'completed' } }),
+    },
+    contributionServiceImpl: {
+      submitCustodialContribution: async () => {
+        submitted += 1;
+        await new Promise((r) => setTimeout(r, 20));
+        return { txHash: 'tx-123', stellarTransactionId: 'stellar-1' };
+      },
+    },
+  });
+
+  const responses = await Promise.all([
+    request(app).get('/api/anchor/deposits/deposit-1').set('Authorization', 'Bearer token'),
+    request(app).get('/api/anchor/deposits/deposit-1').set('Authorization', 'Bearer token'),
+  ]);
+
+  assert.deepEqual(responses.map((r) => r.status), [200, 200]);
+  assert.equal(submitted, 1);
+});
