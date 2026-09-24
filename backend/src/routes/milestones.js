@@ -76,7 +76,7 @@ async function setCampaignStatusFromMilestoneProgress(client, campaignId) {
 router.get('/campaign/:campaignId', async (req, res) => {
   const { rows } = await db.query(
     `SELECT m.*, 
-            (c.milestones_contract_id IS NOT NULL) AS on_chain
+            (c.milestones_contract_id IS NOT NULL AND c.soroban_status = 'verified') AS on_chain
      FROM milestones m
      JOIN campaigns c ON c.id = m.campaign_id
      WHERE m.campaign_id = $1
