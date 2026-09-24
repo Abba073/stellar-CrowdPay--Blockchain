@@ -12,7 +12,7 @@ const { watchCampaignWallet, addSSEClient, removeSSEClient } = require('../servi
 const { emitWebhookEventForUser, WEBHOOK_EVENTS } = require('../services/webhookDispatcher');
 const { refreshCampaignStatus, refreshActiveCampaignStatuses } = require('../services/campaignStatusService');
 const { queueFailedCampaignRefunds } = require('../services/campaignStatusActions');
-const { invokeContract, encodeMilestone, nativeToScVal } = require('../services/sorobanService');
+const { provisionCampaignContracts } = require('../services/sorobanService');
 const { sendEmail } = require('../services/emailService');
 const { uploadCampaignCoverImage } = require('../services/storage');
 const { isKycRequiredForCampaigns } = require('../services/kycProvider');
@@ -26,6 +26,34 @@ const {
 const asyncHandler = require('../utils/asyncHandler');
 
 const crypto = require('crypto');
+
+async function provisionSorobanContracts(campaign, creatorPublicKey, milestones) {
+  try {
+    const contracts = await provisionCampaignContracts({
+      campaignId: campaign.id,
+      creatorPublicKey,
+      targetAmount: campaign.target_amount,
+      assetType: campaign.asset_type,
+      deadline: campaign.deadline,
+      milestones,
+    });
+    if (!contracts) {
+      logger.warn('Soroban provisioning not configured; campaign left pending', { campaign_id: campaign.id });
+      return;
+    }
+    await db.query(
+      `UPDATE campaigns
+       SET escrow_contract_id = $1, milestones_contract_id = $2, soroban_status = 'verified'
+       WHERE id = $3`,
+      [contracts.escrowContractId, contracts.milestonesContractId, campaign.id]
+    );
+  } catch (err) {
+    logger.error('Soroban contract provisioning failed', { campaign_id: campaign.id, error: err.message });
+    await db
+      .query("UPDATE campaigns SET soroban_status = 'failed' WHERE id = $1", [campaign.id])
+      .catch(() => {});
+  }
+}
 
 function stripHtml(value = '') {
   return String(value).replace(/<[^>]*>/g, '').trim();
@@ -249,7 +277,7 @@ router.get('/mine', requireAuth, asyncHandler(async (req, res) => {
 
 router.get('/:id/milestones', asyncHandler(async (req, res) => {
   const { rows } = await db.query(
-    `SELECT m.*, (c.milestones_contract_id IS NOT NULL) AS on_chain
+    `SELECT m.*, (c.milestones_contract_id IS NOT NULL AND c.soroban_status = 'verified') AS on_chain
      FROM milestones m
      JOIN campaigns c ON c.id = m.campaign_id
      WHERE m.campaign_id = $1
@@ -508,14 +536,14 @@ router.get('/:id/stream', asyncHandler(async (req, res) => {
   });
 }));
 
-// Get campaign-raised balance (returns raised_amount from DB; suspended campaigns return minimal info)
+// Get live on-chain balance for a campaign
 router.get('/:id/balance', asyncHandler(async (req, res) => {
   /**
    * @openapi
    * /api/campaigns/{id}/balance:
    *   get:
    *     tags: [Campaigns]
-   *     summary: Get campaign-raised balance
+   *     summary: Get live on-chain balance for a campaign wallet
    *     parameters:
    *       - in: path
    *         name: id
@@ -527,25 +555,22 @@ router.get('/:id/balance', asyncHandler(async (req, res) => {
    *         content:
    *           application/json:
    *             schema:
-   *               type: object
-   *               properties:
-   *                 raised_amount: { type: string }
+   *               type: array
+   *               items:
+   *                 type: object
+   *                 properties:
+   *                   asset_type: { type: string }
+   *                   balance: { type: string }
    *       404:
    *         description: Campaign not found
    */
   const { rows } = await db.query(
-    'SELECT status, raised_amount FROM campaigns WHERE id = $1 AND deleted_at IS NULL',
+    'SELECT wallet_public_key FROM campaigns WHERE id = $1',
     [req.params.id]
   );
   if (!rows.length) return res.status(404).json({ error: 'Campaign not found' });
-
-  const { status, raised_amount } = rows[0];
-
-  if (status === 'suspended') {
-    return res.status(200).json({ suspended: true });
-  }
-
-  res.json({ raised_amount });
+  const balance = await getCampaignBalance(rows[0].wallet_public_key);
+  res.json(balance);
 }));
 
 // Scheduled endpoint to fail expired campaigns and prevent further contributions
@@ -666,10 +691,6 @@ router.post('/', requireAuth, requireRole('creator', 'admin'), createCampaignVal
   // 1. Create the on-chain campaign wallet
   const wallet = await createCampaignWallet(creatorPublicKey);
 
-  // 2. Deploy/Instantiate Soroban Contracts (Mocking IDs for now, but preparing initialization)
-  const escrowContractId = "C" + crypto.randomBytes(24).toString('hex').toUpperCase();
-  const milestonesContractId = "C" + crypto.randomBytes(24).toString('hex').toUpperCase();
-
   const client = await db.connect();
   let campaign;
   try {
@@ -677,11 +698,11 @@ router.post('/', requireAuth, requireRole('creator', 'admin'), createCampaignVal
     const { rows } = await client.query(
       `INSERT INTO campaigns
          (title, description, target_amount, asset_type, wallet_public_key, creator_id, deadline, 
-          min_contribution, max_contribution, escrow_contract_id, milestones_contract_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          min_contribution, max_contribution)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
       [title, description, target_amount, asset_type, wallet.publicKey, req.user.userId, deadline, 
-       min_contribution || null, max_contribution || null, escrowContractId, milestonesContractId]
+       min_contribution || null, max_contribution || null]
     );
     campaign = rows[0];
 
@@ -707,28 +728,6 @@ router.post('/', requireAuth, requireRole('creator', 'admin'), createCampaignVal
       );
     }
 
-    // Soroban Initialization:
-    // In a real scenario, we would call the contracts here.
-    // milestones.initialize(creator, platform, escrow, milestones_vec)
-    /*
-    try {
-      const milestoneScVals = normalizedMilestones.map(m => encodeMilestone(m));
-      await invokeContract({
-        contractId: milestonesContractId,
-        method: 'initialize',
-        args: [
-          nativeToScVal(Address.fromString(creatorPublicKey)),
-          nativeToScVal(Address.fromString(process.env.PLATFORM_PUBLIC_KEY)),
-          nativeToScVal(Address.fromString(escrowContractId)),
-          nativeToScVal(milestoneScVals)
-        ],
-        signerSecret: process.env.PLATFORM_SECRET_KEY
-      });
-    } catch (err) {
-      logger.error('Soroban contract initialization failed', { error: err.message });
-    }
-    */
-
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -745,6 +744,10 @@ router.post('/', requireAuth, requireRole('creator', 'admin'), createCampaignVal
   }
 
   watchCampaignWallet(campaign.id, wallet.publicKey);
+
+  // Contracts are deployed in the background; the campaign stays soroban_status='pending'
+  // (on_chain=false) until deploy + initialize + verification all succeed.
+  provisionSorobanContracts(campaign, creatorPublicKey, normalizedMilestones);
 
   res.status(201).json(campaign);
 }));

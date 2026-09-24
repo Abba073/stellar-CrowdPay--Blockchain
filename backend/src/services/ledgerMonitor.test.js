@@ -129,3 +129,38 @@ test('handlePayment accepts contributions on funded campaigns', async () => {
 
   assert.equal(insertCalled, true);
 });
+
+test('handlePayment binds exactly as many params as INSERT placeholders and persists fee + display name', async () => {
+  let insert;
+  const mockQuery = async (text, params) => {
+    if (text.includes('SELECT status FROM campaigns')) return { rows: [{ status: 'active' }] };
+    if (text.includes('SELECT creator_id FROM campaigns')) return { rows: [{ creator_id: 'user-creator' }] };
+    if (text.includes('SELECT id FROM contributions WHERE tx_hash')) return { rows: [] };
+    if (text.includes("FROM stellar_transactions") && text.includes("kind = 'contribution'")) {
+      return { rows: [{ metadata: { platform_fee_amount: 0.15, display_name: 'Ada' } }] };
+    }
+    if (text.includes('INSERT INTO contributions')) {
+      insert = { text, params };
+      return { rows: [{ id: 'contrib-id' }] };
+    }
+    if (text.includes('SELECT raised_amount FROM campaigns')) return { rows: [{ raised_amount: '1' }] };
+    return { rows: [] };
+  };
+
+  const { ledgerMonitor } = buildLedgerMonitor(mockQuery);
+  await ledgerMonitor.handlePayment('camp-1', 'GWALLET', {
+    to: 'GWALLET',
+    from: 'GFROM',
+    type: 'payment',
+    asset_type: 'native',
+    amount: '1',
+    transaction_hash: 'txhash-params',
+  });
+
+  const placeholders = new Set(insert.text.match(/\$\d+/g)).size;
+  const columns = insert.text.match(/\(([^)]*)\)\s*VALUES/)[1].split(',').length;
+  assert.equal(insert.params.length, placeholders);
+  assert.equal(columns, placeholders);
+  assert.equal(insert.params[14], 0.15);
+  assert.equal(insert.params[15], 'Ada');
+});
