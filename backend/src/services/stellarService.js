@@ -265,6 +265,8 @@ async function buildUnsignedContributionPayment({
     );
   }
 
+  if (memo) builder.addMemo(Memo.text(memo));
+
   const tx = builder.setTimeout(TX_TIMEOUT_CONTRIBUTION_S).build();
   return tx.toXDR();
 }
@@ -352,6 +354,8 @@ async function buildUnsignedContributionPathPayment({
       })
     );
   }
+
+  if (memo) builder.addMemo(Memo.text(memo));
 
   const tx = builder.setTimeout(TX_TIMEOUT_CONTRIBUTION_S).build();
   return tx.toXDR();
