@@ -508,14 +508,14 @@ router.get('/:id/stream', asyncHandler(async (req, res) => {
   });
 }));
 
-// Get live on-chain balance for a campaign
+// Get campaign-raised balance (returns raised_amount from DB; suspended campaigns return minimal info)
 router.get('/:id/balance', asyncHandler(async (req, res) => {
   /**
    * @openapi
    * /api/campaigns/{id}/balance:
    *   get:
    *     tags: [Campaigns]
-   *     summary: Get live on-chain balance for a campaign wallet
+   *     summary: Get campaign-raised balance
    *     parameters:
    *       - in: path
    *         name: id
@@ -527,22 +527,25 @@ router.get('/:id/balance', asyncHandler(async (req, res) => {
    *         content:
    *           application/json:
    *             schema:
-   *               type: array
-   *               items:
-   *                 type: object
-   *                 properties:
-   *                   asset_type: { type: string }
-   *                   balance: { type: string }
+   *               type: object
+   *               properties:
+   *                 raised_amount: { type: string }
    *       404:
    *         description: Campaign not found
    */
   const { rows } = await db.query(
-    'SELECT wallet_public_key FROM campaigns WHERE id = $1',
+    'SELECT status, raised_amount FROM campaigns WHERE id = $1 AND deleted_at IS NULL',
     [req.params.id]
   );
   if (!rows.length) return res.status(404).json({ error: 'Campaign not found' });
-  const balance = await getCampaignBalance(rows[0].wallet_public_key);
-  res.json(balance);
+
+  const { status, raised_amount } = rows[0];
+
+  if (status === 'suspended') {
+    return res.status(200).json({ suspended: true });
+  }
+
+  res.json({ raised_amount });
 }));
 
 // Scheduled endpoint to fail expired campaigns and prevent further contributions

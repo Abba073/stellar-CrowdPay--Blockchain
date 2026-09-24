@@ -264,3 +264,59 @@ test('GET /api/campaigns supports search, asset filter, and sort', async () => {
   assert.ok(listQuery.params.includes('%solar%'));
   assert.ok(listQuery.params.includes('USDC'));
 });
+
+test('GET /api/campaigns/:id/balance returns raised_amount for an active campaign', async () => {
+  const app = buildApp({
+    queryImpl: async (text) => {
+      if (text.includes('SELECT status, raised_amount FROM campaigns')) {
+        return { rows: [{ status: 'active', raised_amount: '250.0000000' }] };
+      }
+      return { rows: [] };
+    },
+    buildWithdrawalTransactionImpl: async () => '',
+    insertWithdrawalPendingSignaturesImpl: async () => 'tx-row',
+  });
+
+  const response = await request(app).get('/api/campaigns/camp-1/balance');
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.raised_amount, '250.0000000');
+  assert.equal(response.body.XLM, undefined, 'should not expose raw on-chain balances');
+});
+
+test('GET /api/campaigns/:id/balance returns suspended:true for a suspended campaign', async () => {
+  const app = buildApp({
+    queryImpl: async (text) => {
+      if (text.includes('SELECT status, raised_amount FROM campaigns')) {
+        return { rows: [{ status: 'suspended', raised_amount: '100.0000000' }] };
+      }
+      return { rows: [] };
+    },
+    buildWithdrawalTransactionImpl: async () => '',
+    insertWithdrawalPendingSignaturesImpl: async () => 'tx-row',
+  });
+
+  const response = await request(app).get('/api/campaigns/camp-suspended/balance');
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.suspended, true);
+  assert.equal(response.body.raised_amount, undefined, 'should not expose raised amount for suspended campaign');
+});
+
+test('GET /api/campaigns/:id/balance returns 404 for unknown campaign', async () => {
+  const app = buildApp({
+    queryImpl: async (text) => {
+      if (text.includes('SELECT status, raised_amount FROM campaigns')) {
+        return { rows: [] };
+      }
+      return { rows: [] };
+    },
+    buildWithdrawalTransactionImpl: async () => '',
+    insertWithdrawalPendingSignaturesImpl: async () => 'tx-row',
+  });
+
+  const response = await request(app).get('/api/campaigns/nonexistent/balance');
+
+  assert.equal(response.status, 404);
+  assert.equal(response.body.error, 'Campaign not found');
+});
