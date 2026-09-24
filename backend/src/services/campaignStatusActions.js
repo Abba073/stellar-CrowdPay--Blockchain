@@ -99,7 +99,11 @@ async function syncSorobanStatus(campaign) {
       contract_id: campaign.escrow_contract_id,
       status: campaign.status,
     });
+    await db.query("UPDATE campaigns SET soroban_status = 'verified' WHERE id = $1", [campaign.id]);
   } catch (err) {
+    await db
+      .query("UPDATE campaigns SET soroban_status = 'failed' WHERE id = $1", [campaign.id])
+      .catch(() => {});
     logger.error('Soroban escrow verification failed after status transition', {
       campaign_id: campaign.id,
       contract_id: campaign.escrow_contract_id,
