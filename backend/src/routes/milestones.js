@@ -309,52 +309,107 @@ const approveMilestoneReleaseHandler = async (req, res) => {
     return res.status(409).json({ error: 'Milestone already released' });
   }
 
-  const releaseAmount = toReleaseAmount(milestone.raised_amount, milestone.release_percentage);
-  const unsignedXdr = await buildWithdrawalTransaction({
-    campaignWalletPublicKey: milestone.campaign_wallet_public_key,
-    destinationPublicKey: milestone.destination_key,
-    amount: releaseAmount,
-    asset: milestone.asset_type,
-  });
-
-  let creatorSignedXdr;
-  try {
-    creatorSignedXdr = await withDecryptedWalletSecret(
-      milestone.wallet_secret_encrypted,
-      {
-        userId: milestone.creator_id,
-        walletPublicKey: milestone.creator_wallet_public_key,
-      },
-      async (creatorSecret) =>
-        signTransactionXdr({
-          xdr: unsignedXdr,
-          signerSecret: creatorSecret,
-        })
-    );
-  } catch (err) {
-    logger.error('Milestone creator signature failed', { milestone_id: milestone.id, error: err.message });
-    return res.status(503).json({ error: 'Creator signature could not be produced for this milestone release.' });
-  }
-
-  const fullySignedXdr = signTransactionXdr({
-    xdr: creatorSignedXdr,
-    signerSecret: process.env.PLATFORM_SECRET_KEY,
-  });
-
-  if (signatureCountFromXdr(fullySignedXdr) < 2) {
-    return res.status(422).json({ error: 'Milestone release requires both creator and platform signatures' });
-  }
-
+  let releaseAmount;
+  let unsignedXdr = null;
+  let fullySignedXdr;
   let txHash;
-  try {
-    txHash = await submitSignedWithdrawal({ xdr: fullySignedXdr });
-  } catch (err) {
-    logger.error('Milestone release submission failed', { milestone_id: milestone.id, error: err.message });
-    sendAlert('Milestone release submission failed', { milestone_id: milestone.id, error: err.message });
-    return res.status(502).json({
-      error: 'Stellar network rejected the milestone release transaction',
-      detail: err.message || String(err),
+
+  if (milestone.release_tx_hash) {
+    // A previous approval submitted the payout on-chain but its DB commit failed: reconcile
+    // from the recorded transaction instead of paying again.
+    releaseAmount = milestone.release_amount ?? toReleaseAmount(milestone.raised_amount, milestone.release_percentage);
+    fullySignedXdr = milestone.release_signed_xdr;
+    txHash = milestone.release_tx_hash;
+    logger.warn('Reconciling milestone release that was submitted on-chain', { milestone_id: milestone.id, tx_hash: txHash });
+  } else {
+    // Claim the release BEFORE any on-chain submission; only one concurrent approval can win.
+    const { rows: claimRows } = await db.query(
+      `UPDATE milestones m
+       SET release_claimed_at = NOW()
+       WHERE m.id = $1
+         AND m.status <> 'released'
+         AND m.release_claimed_at IS NULL
+         AND NOT EXISTS (SELECT 1 FROM withdrawal_requests w WHERE w.milestone_id = m.id)
+       RETURNING m.id`,
+      [milestone.id]
+    );
+    if (!claimRows.length) {
+      return res.status(409).json({ error: 'A release is already in progress or recorded for this milestone' });
+    }
+
+    const releaseClaim = async () => {
+      await db.query('UPDATE milestones SET release_claimed_at = NULL WHERE id = $1', [milestone.id])
+        .catch((e) => logger.error('Failed to release milestone claim', { milestone_id: milestone.id, error: e.message }));
+    };
+
+    releaseAmount = toReleaseAmount(milestone.raised_amount, milestone.release_percentage);
+    try {
+      unsignedXdr = await buildWithdrawalTransaction({
+        campaignWalletPublicKey: milestone.campaign_wallet_public_key,
+        destinationPublicKey: milestone.destination_key,
+        amount: releaseAmount,
+        asset: milestone.asset_type,
+      });
+    } catch (err) {
+      await releaseClaim();
+      logger.error('Milestone release transaction build failed', { milestone_id: milestone.id, error: err.message });
+      return res.status(502).json({ error: 'Could not build the milestone release transaction' });
+    }
+
+    let creatorSignedXdr;
+    try {
+      creatorSignedXdr = await withDecryptedWalletSecret(
+        milestone.wallet_secret_encrypted,
+        {
+          userId: milestone.creator_id,
+          walletPublicKey: milestone.creator_wallet_public_key,
+        },
+        async (creatorSecret) =>
+          signTransactionXdr({
+            xdr: unsignedXdr,
+            signerSecret: creatorSecret,
+          })
+      );
+    } catch (err) {
+      await releaseClaim();
+      logger.error('Milestone creator signature failed', { milestone_id: milestone.id, error: err.message });
+      return res.status(503).json({ error: 'Creator signature could not be produced for this milestone release.' });
+    }
+
+    fullySignedXdr = signTransactionXdr({
+      xdr: creatorSignedXdr,
+      signerSecret: process.env.PLATFORM_SECRET_KEY,
     });
+
+    if (signatureCountFromXdr(fullySignedXdr) < 2) {
+      await releaseClaim();
+      return res.status(422).json({ error: 'Milestone release requires both creator and platform signatures' });
+    }
+
+    try {
+      txHash = await submitSignedWithdrawal({ xdr: fullySignedXdr });
+    } catch (err) {
+      await releaseClaim();
+      logger.error('Milestone release submission failed', { milestone_id: milestone.id, error: err.message });
+      sendAlert('Milestone release submission failed', { milestone_id: milestone.id, error: err.message });
+      return res.status(502).json({
+        error: 'Stellar network rejected the milestone release transaction',
+        detail: err.message || String(err),
+      });
+    }
+
+    // Record the on-chain payout immediately so a failed DB commit below can be reconciled.
+    try {
+      await db.query(
+        `UPDATE milestones
+         SET release_tx_hash = $1, release_signed_xdr = $2, release_amount = $3
+         WHERE id = $4`,
+        [txHash, fullySignedXdr, releaseAmount, milestone.id]
+      );
+    } catch (err) {
+      logger.error('Failed to record milestone release tx hash', { milestone_id: milestone.id, tx_hash: txHash, error: err.message });
+      sendAlert('Milestone release paid on-chain but tx hash not recorded', { milestone_id: milestone.id, tx_hash: txHash });
+    }
   }
 
   const client = await db.connect();
@@ -414,7 +469,7 @@ const approveMilestoneReleaseHandler = async (req, res) => {
       campaignId: milestone.campaign_id,
       withdrawalRequestId: withdrawalRequest.id,
       userId: req.user.userId,
-      unsignedXdr,
+      unsignedXdr: unsignedXdr || fullySignedXdr,
       metadata: {
         milestone_id: milestone.id,
         milestone_title: milestone.title,

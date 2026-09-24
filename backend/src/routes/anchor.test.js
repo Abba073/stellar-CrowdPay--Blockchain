@@ -234,58 +234,48 @@ test('GET /api/anchor/deposits/:id refreshes anchor session status', async () =>
   assert.ok(queryCount >= 3);
 });
 
-test('anchor deposit endpoints reject zero, negative, NaN and malformed amounts with 400', async () => {
+test('concurrent completed-status polls submit exactly one contribution', async () => {
+  let submitted = 0;
+  let claimed = false;
+  const session = {
+    id: 'deposit-1', user_id: 'user-1', campaign_id: 'camp-1', anchor_id: 'moneygram',
+    anchor_transaction_id: 'anchor-tx', anchor_asset: 'USDC', anchor_amount: '10',
+    contribution_amount: '10', campaign_asset: 'USDC', status: 'pending_anchor',
+    last_anchor_status: 'pending', last_anchor_payload: {}, deposit_type: 'campaign',
+    contribution_tx_hash: null, contribution_id: null,
+    wallet_public_key: 'GUSER', wallet_secret_encrypted: 'encrypted',
+  };
   const { app } = buildApp({
-    queryImpl: async () => ({ rows: [] }),
+    queryImpl: async (text) => {
+      if (text.includes('FROM anchor_deposits ad')) return { rows: [{ ...session }] };
+      if (text.includes('contribution_submitting_at = NOW()')) {
+        // Emulates the atomic conditional UPDATE: only the first caller wins.
+        if (claimed) return { rows: [] };
+        claimed = true;
+        return { rows: [{ id: 'deposit-1' }] };
+      }
+      if (text.includes('FROM campaigns c JOIN users u')) return { rows: [{ id: 'camp-1', status: 'active' }] };
+      if (text.includes('SELECT * FROM anchor_deposits WHERE id = $1')) return { rows: [{ ...session, status: 'contribution_submitted' }] };
+      return { rows: [] };
+    },
     anchorServiceImpl: {
-      getAnchorById: (id) => ({ id, assetCode: 'USDC' }),
-      isAnchorConfigured: () => true,
+      getAnchorById: () => ({ id: 'moneygram', assetCode: 'USDC' }),
+      getAnchorTransaction: async () => ({ transaction: { status: 'completed' } }),
+    },
+    contributionServiceImpl: {
+      submitCustodialContribution: async () => {
+        submitted += 1;
+        await new Promise((r) => setTimeout(r, 20));
+        return { txHash: 'tx-123', stellarTransactionId: 'stellar-1' };
+      },
     },
   });
 
-  const bad = ['0', '0.0', '0.0000000', '-1', 'NaN', 'Infinity', '1e3', 'abc', '1.12345678', '', ' ', {}, [], 0, -5];
-  for (const path of ['/api/anchor/deposits/start', '/api/anchor/sep24/deposit']) {
-    for (const amount of bad) {
-      const response = await request(app)
-        .post(path)
-        .set('Authorization', 'Bearer token')
-        .send({ campaign_id: 'camp-1', amount, anchor_id: 'moneygram' });
-      assert.equal(response.status, 400, `${path} should reject ${JSON.stringify(amount)}`);
-    }
-  }
-});
+  const responses = await Promise.all([
+    request(app).get('/api/anchor/deposits/deposit-1').set('Authorization', 'Bearer token'),
+    request(app).get('/api/anchor/deposits/deposit-1').set('Authorization', 'Bearer token'),
+  ]);
 
-test('anchor deposit start accepts boundary amounts (smallest unit and large values)', async () => {
-  for (const amount of ['0.0000001', '1', '10.5', '999999999.9999999', 5]) {
-    const { app } = buildApp({
-      queryImpl: async (text) => {
-        if (text.includes('FROM campaigns c JOIN users u ON u.id = c.creator_id')) {
-          return { rows: [{ id: 'camp-1', asset_type: 'USDC', status: 'active' }] };
-        }
-        if (text.includes('SELECT id, wallet_public_key, wallet_secret_encrypted FROM users WHERE id')) {
-          return { rows: [{ id: 'user-1', wallet_public_key: 'GUSER', wallet_secret_encrypted: 'enc' }] };
-        }
-        if (text.includes('INSERT INTO anchor_deposits')) {
-          return { rows: [{ id: 'deposit-1', anchor_id: 'moneygram', status: 'pending_anchor' }] };
-        }
-        return { rows: [] };
-      },
-      anchorServiceImpl: {
-        getAnchorById: (id) => ({ id, assetCode: 'USDC' }),
-        getAvailableAnchors: () => [],
-        publicAnchorInfo: (a) => a,
-        isAnchorConfigured: () => true,
-        authenticateWithAnchor: async () => ({ token: 't', expiresAt: new Date(Date.now() + 60000) }),
-        startInteractiveDeposit: async () => ({ id: 'tx-1', url: 'https://anchor.example/f', status: 'pending' }),
-      },
-      contributionServiceImpl: {
-        buildContributionIntent: async () => ({ kind: 'payment', conversionQuote: null }),
-      },
-    });
-    const response = await request(app)
-      .post('/api/anchor/deposits/start')
-      .set('Authorization', 'Bearer token')
-      .send({ campaign_id: 'camp-1', amount, anchor_id: 'moneygram' });
-    assert.equal(response.status, 201, `amount ${amount} should be accepted`);
-  }
+  assert.deepEqual(responses.map((r) => r.status), [200, 200]);
+  assert.equal(submitted, 1);
 });

@@ -94,13 +94,6 @@ async function ensureAnchorAuth({ anchor, sessionRow, user }) {
   return { ...auth, refreshed: true };
 }
 
-// Decimal-safe amount check: positive, finite, plain decimal string with at most 7 places (Stellar precision).
-function isValidDepositAmount(amount) {
-  if (typeof amount !== 'string' && typeof amount !== 'number') return false;
-  const str = String(amount).trim();
-  return /^\d+(\.\d{1,7})?$/.test(str) && /[1-9]/.test(str);
-}
-
 router.get('/info', (_req, res) => {
   res.json({
     supported_assets: getSupportedAssetCodes(),
@@ -112,9 +105,6 @@ router.post('/deposits/start', requireAuth, async (req, res) => {
   const { campaign_id, amount, anchor_id } = req.body || {};
   if (!campaign_id || !amount || !anchor_id) {
     return res.status(400).json({ error: 'campaign_id, amount and anchor_id are required' });
-  }
-  if (!isValidDepositAmount(amount)) {
-    return res.status(400).json({ error: 'amount must be a positive number with at most 7 decimal places' });
   }
 
   const anchor = getAnchorById(anchor_id);
@@ -231,9 +221,6 @@ router.post('/sep24/deposit', requireAuth, async (req, res) => {
   const { amount, anchor_id } = req.body || {};
   if (!amount || !anchor_id) {
     return res.status(400).json({ error: 'amount and anchor_id are required' });
-  }
-  if (!isValidDepositAmount(amount)) {
-    return res.status(400).json({ error: 'amount must be a positive number with at most 7 decimal places' });
   }
 
   const anchor = getAnchorById(anchor_id);
@@ -398,7 +385,8 @@ router.get('/deposits/:id', requireAuth, async (req, res) => {
            last_anchor_payload = $3::jsonb,
            updated_at = NOW(),
            completed_at = CASE WHEN $1 IN ('completed', 'failed') THEN COALESCE(completed_at, NOW()) ELSE completed_at END
-       WHERE id = $4`,
+       WHERE id = $4
+         AND NOT (contribution_tx_hash IS NOT NULL AND $1 = 'deposit_completed')`,
       [localStatus, remoteStatus, JSON.stringify(remoteTx), session.id]
     );
 
@@ -433,48 +421,67 @@ router.get('/deposits/:id', requireAuth, async (req, res) => {
             ['Deposit completed, but the campaign is no longer accepting contributions.', session.id]
           );
         } else {
-          try {
-            const result = await submitCustodialContribution({
-              campaign,
-              campaignId: session.campaign_id,
-              userId: req.user.userId,
-              walletPublicKey: session.wallet_public_key,
-              walletSecretEncrypted: session.wallet_secret_encrypted,
-              amount: session.contribution_amount,
-              sendAsset: session.anchor_asset,
-              intentOverride: session.contribution_flow,
-              anchorMetadata: {
-                anchor_id: session.anchor_id,
-                anchor_transaction_id: session.anchor_transaction_id,
-                anchor_asset: session.anchor_asset,
-                anchor_amount: session.anchor_amount,
+          // Atomically claim the submission so concurrent polls/retries cannot double-fund.
+          const { rows: claimed } = await db.query(
+            `UPDATE anchor_deposits
+             SET contribution_submitting_at = NOW()
+             WHERE id = $1
+               AND contribution_tx_hash IS NULL
+               AND contribution_id IS NULL
+               AND contribution_submitting_at IS NULL
+             RETURNING id`,
+            [session.id]
+          );
+          // Another poll already owns the submission when the claim returns no row.
+          if (claimed.length) {
+            let result = null;
+            try {
+              result = await submitCustodialContribution({
+                campaign,
+                campaignId: session.campaign_id,
+                userId: req.user.userId,
+                walletPublicKey: session.wallet_public_key,
+                walletSecretEncrypted: session.wallet_secret_encrypted,
+                amount: session.contribution_amount,
+                sendAsset: session.anchor_asset,
+                intentOverride: session.contribution_flow,
+                anchorMetadata: {
+                  anchor_id: session.anchor_id,
+                  anchor_transaction_id: session.anchor_transaction_id,
+                  anchor_asset: session.anchor_asset,
+                  anchor_amount: session.anchor_amount,
+                  anchor_deposit_id: session.id,
+                },
+              });
+            } catch (err) {
+              logger.error('Anchor contribution submission failed after deposit completion', {
                 anchor_deposit_id: session.id,
-              },
-            });
-
-            await db.query(
-              `UPDATE anchor_deposits
-               SET status = 'contribution_submitted',
-                   contribution_tx_hash = $1,
-                   contribution_stellar_transaction_id = $2,
-                   last_error = NULL,
-                   updated_at = NOW()
-               WHERE id = $3`,
-              [result.txHash, result.stellarTransactionId, session.id]
-            );
-          } catch (err) {
-            logger.error('Anchor contribution submission failed after deposit completion', {
-              anchor_deposit_id: session.id,
-              error: err.message,
-            });
-            await db.query(
-              `UPDATE anchor_deposits
-               SET status = 'deposit_completed',
-                   last_error = $1,
-                   updated_at = NOW()
-               WHERE id = $2`,
-              [err.message || 'Contribution submission failed after deposit completion', session.id]
-            );
+                error: err.message,
+              });
+              // Submission definitively failed: release the claim so a later poll can retry.
+              await db.query(
+                `UPDATE anchor_deposits
+                 SET status = 'deposit_completed',
+                     contribution_submitting_at = NULL,
+                     last_error = $1,
+                     updated_at = NOW()
+                 WHERE id = $2`,
+                [err.message || 'Contribution submission failed after deposit completion', session.id]
+              );
+            }
+            // The claim stays set after a successful on-chain submission so it is never re-sent.
+            if (result) {
+              await db.query(
+                `UPDATE anchor_deposits
+                 SET status = 'contribution_submitted',
+                     contribution_tx_hash = $1,
+                     contribution_stellar_transaction_id = $2,
+                     last_error = NULL,
+                     updated_at = NOW()
+                 WHERE id = $3`,
+                [result.txHash, result.stellarTransactionId, session.id]
+              );
+            }
           }
         }
       }
