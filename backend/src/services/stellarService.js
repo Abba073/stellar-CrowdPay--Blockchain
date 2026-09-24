@@ -427,6 +427,56 @@ async function getPathPaymentQuote({ sendAsset, destAsset, destAmount }) {
 }
 
 /**
+ * Validate a single withdrawal entry (amount, asset, destination).
+ * Also verifies the campaign wallet holds sufficient balance when `balances` is supplied.
+ *
+ * @param {object} params
+ * @param {string|number} params.amount
+ * @param {string}        params.asset
+ * @param {string}        params.destinationPublicKey
+ * @param {object}        [params.balances]  - map from getCampaignBalance(); optional
+ * @throws {Error} with a descriptive message when a constraint is violated
+ */
+function validateWithdrawalParams({ amount, asset, destinationPublicKey, balances }) {
+  // --- destination key ---
+  try {
+    Keypair.fromPublicKey(destinationPublicKey);
+  } catch {
+    throw new Error(`Invalid destination public key: ${destinationPublicKey}`);
+  }
+
+  // --- asset ---
+  if (!configuredAssets[asset]) {
+    throw new Error(`Unsupported asset: ${asset}. Supported: ${Object.keys(configuredAssets).join(', ')}`);
+  }
+
+  // --- amount: must be a positive finite number with at most 7 decimal places ---
+  const parsed = Number(amount);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`Amount must be a positive number, got: ${amount}`);
+  }
+  const amountStr = String(amount);
+  const dotIdx = amountStr.indexOf('.');
+  if (dotIdx !== -1 && amountStr.length - dotIdx - 1 > 7) {
+    throw new Error(`Amount exceeds 7 decimal places (Stellar stroops limit): ${amount}`);
+  }
+  // Dust check: minimum one stroop (0.0000001)
+  if (parsed < 0.0000001) {
+    throw new Error(`Amount is below the minimum stroop (0.0000001): ${amount}`);
+  }
+
+  // --- balance cover ---
+  if (balances) {
+    const available = parseFloat(balances[asset] || '0');
+    if (parsed > available) {
+      throw new Error(
+        `Insufficient balance: requested ${parsed} ${asset} but wallet only holds ${available} ${asset}`
+      );
+    }
+  }
+}
+
+/**
  * Build a withdrawal transaction for a campaign wallet.
  * Returns the unsigned XDR — both the creator and platform must sign it.
  */
@@ -436,7 +486,19 @@ async function buildWithdrawalTransaction({
   amount,
   asset,
 }) {
+  // Validate before hitting the network so callers get a fast, descriptive error.
+  validateWithdrawalParams({ amount, asset, destinationPublicKey });
+
   const campaignAccount = await server.loadAccount(campaignWalletPublicKey);
+
+  // Verify the on-chain balance actually covers the requested amount.
+  const balances = {};
+  for (const b of campaignAccount.balances) {
+    const key = b.asset_type === 'native' ? 'XLM' : b.asset_code;
+    balances[key] = b.balance;
+  }
+  validateWithdrawalParams({ amount, asset, destinationPublicKey, balances });
+
   const stellarAsset = toStellarAsset(asset);
 
   const tx = new TransactionBuilder(campaignAccount, {
@@ -464,7 +526,34 @@ async function buildBatchRefundTransaction({
   campaignWalletPublicKey,
   refunds,
 }) {
+  if (!Array.isArray(refunds) || refunds.length === 0) {
+    throw new Error('refunds must be a non-empty array');
+  }
+
   const campaignAccount = await server.loadAccount(campaignWalletPublicKey);
+
+  // Build a balance map once so we can check each refund against real on-chain holdings.
+  const balances = {};
+  for (const b of campaignAccount.balances) {
+    const key = b.asset_type === 'native' ? 'XLM' : b.asset_code;
+    balances[key] = b.balance;
+  }
+
+  // Validate all entries up-front — reject the whole batch if any entry is invalid.
+  for (let i = 0; i < refunds.length; i++) {
+    const refund = refunds[i];
+    try {
+      validateWithdrawalParams({
+        amount: refund.amount,
+        asset: refund.asset,
+        destinationPublicKey: refund.destinationPublicKey,
+        balances,
+      });
+    } catch (err) {
+      throw new Error(`refunds[${i}]: ${err.message}`);
+    }
+  }
+
   const builder = new TransactionBuilder(campaignAccount, {
     fee: BASE_FEE,
     networkPassphrase,
@@ -645,6 +734,7 @@ module.exports = {
   submitPathPayment,
   submitPreparedTransaction,
   getPathPaymentQuote,
+  validateWithdrawalParams,
   buildWithdrawalTransaction,
   getAccountMultisigConfig,
   signTransactionXdr,
