@@ -10,6 +10,8 @@ const {
   signTransactionXdr,
   signatureCountFromXdr,
   submitSignedWithdrawal,
+  getTransactionHash,
+  transactionExistsOnHorizon,
   isXdrExpired,
   PLATFORM_PUBLIC_KEY,
 } = require('../services/stellarService');
@@ -414,10 +416,59 @@ const platformApproveHandler = async (req, res) => {
     return res.status(422).json({ error: 'Insufficient signatures: expected creator + platform' });
   }
 
+  // Idempotency: the tx hash is derived from the envelope body, so a retry after an ambiguous
+  // outcome (submitted but DB update lost) resolves to the same hash. Reconcile against Horizon
+  // instead of submitting again.
+  const expectedHash = getTransactionHash(signedXdr);
   let txHash;
+  let alreadyOnChain = false;
   try {
-    txHash = await submitSignedWithdrawal({ xdr: signedXdr });
-  } catch (err) {
+    alreadyOnChain = await transactionExistsOnHorizon(expectedHash);
+  } catch (lookupErr) {
+    logger.warn('Horizon pre-submit lookup failed; proceeding to submit', {
+      withdrawal_id: req.params.id,
+      error: lookupErr.message,
+    });
+  }
+
+  let submitError = null;
+  if (alreadyOnChain) {
+    txHash = expectedHash;
+    logger.warn('Withdrawal already on Stellar; reconciling records without resubmitting', {
+      withdrawal_id: req.params.id,
+      tx_hash: txHash,
+    });
+  } else {
+    try {
+      txHash = await submitSignedWithdrawal({ xdr: signedXdr });
+    } catch (err) {
+      submitError = err;
+    }
+  }
+
+  if (submitError) {
+    // The submit call may have failed after the network accepted the tx (timeout etc.).
+    let landed;
+    try {
+      landed = await transactionExistsOnHorizon(expectedHash);
+    } catch (lookupErr) {
+      logger.error('Withdrawal submission outcome unknown', {
+        withdrawal_id: req.params.id,
+        tx_hash: expectedHash,
+        error: lookupErr.message,
+      });
+      return res.status(503).json({
+        error: 'Withdrawal submission outcome is unknown. Retry approval shortly; it will reconcile with Stellar without double-submitting.',
+      });
+    }
+    if (landed) {
+      txHash = expectedHash;
+      submitError = null;
+    }
+  }
+
+  if (submitError) {
+    const err = submitError;
     logger.error('Withdrawal Stellar submission failed', {
       withdrawal_id: req.params.id,
       error: err.message,
@@ -522,7 +573,10 @@ const platformApproveHandler = async (req, res) => {
       tx_hash: txHash,
       error: err.message,
     });
-    res.status(500).json({ error: 'Transaction submitted but failed to update records; check Stellar and audit trail.' });
+    res.status(500).json({
+      error: 'Transaction submitted but records could not be updated. Retry approval to reconcile; it will not resubmit.',
+      tx_hash: txHash,
+    });
   } finally {
     client.release();
   }

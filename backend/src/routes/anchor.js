@@ -94,6 +94,13 @@ async function ensureAnchorAuth({ anchor, sessionRow, user }) {
   return { ...auth, refreshed: true };
 }
 
+// Decimal-safe amount check: positive, finite, plain decimal string with at most 7 places (Stellar precision).
+function isValidDepositAmount(amount) {
+  if (typeof amount !== 'string' && typeof amount !== 'number') return false;
+  const str = String(amount).trim();
+  return /^\d+(\.\d{1,7})?$/.test(str) && /[1-9]/.test(str);
+}
+
 router.get('/info', (_req, res) => {
   res.json({
     supported_assets: getSupportedAssetCodes(),
@@ -105,6 +112,9 @@ router.post('/deposits/start', requireAuth, async (req, res) => {
   const { campaign_id, amount, anchor_id } = req.body || {};
   if (!campaign_id || !amount || !anchor_id) {
     return res.status(400).json({ error: 'campaign_id, amount and anchor_id are required' });
+  }
+  if (!isValidDepositAmount(amount)) {
+    return res.status(400).json({ error: 'amount must be a positive number with at most 7 decimal places' });
   }
 
   const anchor = getAnchorById(anchor_id);
@@ -221,6 +231,9 @@ router.post('/sep24/deposit', requireAuth, async (req, res) => {
   const { amount, anchor_id } = req.body || {};
   if (!amount || !anchor_id) {
     return res.status(400).json({ error: 'amount and anchor_id are required' });
+  }
+  if (!isValidDepositAmount(amount)) {
+    return res.status(400).json({ error: 'amount must be a positive number with at most 7 decimal places' });
   }
 
   const anchor = getAnchorById(anchor_id);

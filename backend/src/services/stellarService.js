@@ -532,6 +532,26 @@ async function submitSignedWithdrawal({ xdr }) {
   return submitPreparedTransaction(xdr);
 }
 
+/** Deterministic transaction hash for an XDR envelope (independent of signatures). */
+function getTransactionHash(xdr) {
+  return TransactionBuilder.fromXDR(xdr, networkPassphrase).hash().toString('hex');
+}
+
+/**
+ * Check Horizon for a transaction by hash.
+ * Returns true if it landed, false if Horizon reports 404, and throws for any other error
+ * so callers can treat the outcome as unknown rather than "not submitted".
+ */
+async function transactionExistsOnHorizon(hash) {
+  try {
+    await server.transactions().transaction(hash).call();
+    return true;
+  } catch (err) {
+    if (err?.response?.status === 404 || err?.name === 'NotFoundError') return false;
+    throw err;
+  }
+}
+
 /**
  * Get the current balance of a campaign wallet.
  */
@@ -651,6 +671,8 @@ module.exports = {
   signatureCountFromXdr,
   isXdrExpired,
   submitSignedWithdrawal,
+  getTransactionHash,
+  transactionExistsOnHorizon,
   recoverWalletFromSecret,
   getWalletTransactionHistory,
   getWalletPayments,
