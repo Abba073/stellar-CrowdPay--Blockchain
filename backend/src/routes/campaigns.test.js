@@ -264,3 +264,44 @@ test('GET /api/campaigns supports search, asset filter, and sort', async () => {
   assert.ok(listQuery.params.includes('%solar%'));
   assert.ok(listQuery.params.includes('USDC'));
 });
+
+test('GET /api/campaigns accepts every valid status and passes it to the filter', async () => {
+  const { VALID_CAMPAIGN_STATUSES } = require('../middleware/validation');
+  for (const status of VALID_CAMPAIGN_STATUSES) {
+    const queries = [];
+    const app = buildApp({
+      queryImpl: async (text, params) => {
+        queries.push({ text, params });
+        return text.includes('COUNT(*)') ? { rows: [{ total: 0 }] } : { rows: [] };
+      },
+    });
+    const response = await request(app).get(`/api/campaigns?status=${status}`);
+    assert.equal(response.status, 200, `status ${status} should be accepted`);
+    assert.ok(queries.some((q) => q.params && q.params.includes(status)));
+  }
+});
+
+test('GET /api/campaigns rejects an unknown status', async () => {
+  const app = buildApp({ queryImpl: async () => ({ rows: [] }) });
+  const response = await request(app).get('/api/campaigns?status=bogus');
+  assert.equal(response.status, 400);
+});
+
+test('GET /api/campaigns applies a distinct ORDER BY for every valid sort', async () => {
+  const { VALID_ORDER_BY } = require('../middleware/validation');
+  const seen = new Set();
+  for (const sort of VALID_ORDER_BY) {
+    let listQuery;
+    const app = buildApp({
+      queryImpl: async (text) => {
+        if (text.includes('ORDER BY')) listQuery = text;
+        return text.includes('COUNT(*)') ? { rows: [{ total: 0 }] } : { rows: [] };
+      },
+    });
+    const response = await request(app).get(`/api/campaigns?sort=${sort}`);
+    assert.equal(response.status, 200, `sort ${sort} should be accepted`);
+    seen.add(listQuery.match(/ORDER BY([\s\S]*?)LIMIT/)[1].trim());
+    if (sort === 'trending') assert.match(listQuery, /INTERVAL '7 days'/);
+  }
+  assert.equal(seen.size, VALID_ORDER_BY.length, 'every sort must map to its own clause');
+});
