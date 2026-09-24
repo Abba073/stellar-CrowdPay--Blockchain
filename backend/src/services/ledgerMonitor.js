@@ -18,6 +18,7 @@ const {
   WEBHOOK_EVENTS,
 } = require("./webhookDispatcher");
 const cache = require("../utils/cache");
+const { sendAlert } = require("./alerting");
 const Sentry = require("@sentry/node");
 
 /** wallet_public_key -> stream metadata */
@@ -58,6 +59,14 @@ function broadcastCampaignUpdate(campaignId, data) {
 }
 
 const MAX_RECONNECT_DELAY_MS = 60_000;
+
+/** Backoff between in-place indexing retries for a single payment. */
+const INDEX_RETRY_DELAYS_MS = [500, 2000, 8000];
+/** Delay before re-replaying from the stored cursor after a payment failed to index. */
+const STALLED_REPLAY_DELAY_MS = 60_000;
+
+/** wallet_public_key -> campaign_id for wallets whose cursor is frozen by a failed payment. */
+const stalledWallets = new Map();
 
 function extractPagingToken(record) {
   if (!record || typeof record !== "object") return null;
@@ -105,6 +114,8 @@ function registrySet(walletPublicKey, patch) {
  */
 async function replayMissedPayments(campaignId, walletPublicKey) {
   let cursor = await loadCursor(campaignId);
+  // A stalled wallet with no stored cursor failed on its first payment: replay from the start.
+  if (!cursor && stalledWallets.has(walletPublicKey)) cursor = "0";
   if (!cursor) return;
 
   for (;;) {
@@ -123,6 +134,9 @@ async function replayMissedPayments(campaignId, walletPublicKey) {
         campaign_id: campaignId,
         error: err.message,
       });
+      if (stalledWallets.has(walletPublicKey)) {
+        scheduleStalledReplay(campaignId, walletPublicKey, STALLED_REPLAY_DELAY_MS);
+      }
       return;
     }
 
@@ -130,7 +144,14 @@ async function replayMissedPayments(campaignId, walletPublicKey) {
     if (!records.length) break;
 
     for (const record of records) {
-      await onPaymentRecord(campaignId, walletPublicKey, record);
+      const ok = await onPaymentRecord(campaignId, walletPublicKey, record, {
+        replay: true,
+      });
+      if (!ok) {
+        // Cursor stays at the last indexed payment; try again later.
+        scheduleStalledReplay(campaignId, walletPublicKey, STALLED_REPLAY_DELAY_MS);
+        return;
+      }
     }
 
     const pageToken =
@@ -139,28 +160,88 @@ async function replayMissedPayments(campaignId, walletPublicKey) {
     cursor = pageToken;
     if (records.length < 100) break;
   }
+  stalledWallets.delete(walletPublicKey);
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function scheduleStalledReplay(campaignId, walletPublicKey, delayMs) {
+  const timer = setTimeout(() => {
+    replayMissedPayments(campaignId, walletPublicKey).catch((err) =>
+      logger.error("Stalled ledger replay failed", {
+        wallet_public_key: walletPublicKey,
+        campaign_id: campaignId,
+        error: err.message,
+      }),
+    );
+  }, delayMs);
+  if (typeof timer.unref === "function") timer.unref();
 }
 
 /**
- * Process one Horizon payment record and always advance stored cursor when possible.
+ * Process one Horizon payment record. The stored cursor only advances after the
+ * payment is durably indexed. On failure the payment is retried with backoff; if
+ * it still fails the cursor stays put, an alert is sent and a replay is scheduled.
+ * While a wallet is stalled, later stream records do not move the cursor either
+ * (indexing is idempotent on tx_hash, so the replay re-processes them safely).
+ *
+ * @returns {Promise<boolean>} true when the payment was indexed.
  */
-async function onPaymentRecord(campaignId, walletPublicKey, record) {
+async function onPaymentRecord(campaignId, walletPublicKey, record, opts = {}) {
   const token = extractPagingToken(record);
-  try {
-    await handlePayment(campaignId, walletPublicKey, record);
-  } finally {
-    if (token) {
-      try {
-        await saveCursor(campaignId, walletPublicKey, token);
-      } catch (e) {
-        logger.error("Failed to persist ledger cursor", {
-          wallet_public_key: walletPublicKey,
-          campaign_id: campaignId,
-          error: e.message,
-        });
-      }
+  const retryDelays = opts.retryDelaysMs || INDEX_RETRY_DELAYS_MS;
+
+  let lastError = null;
+  for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
+    try {
+      await handlePayment(campaignId, walletPublicKey, record);
+      lastError = null;
+      break;
+    } catch (err) {
+      lastError = err;
+      if (attempt < retryDelays.length) await sleep(retryDelays[attempt]);
     }
   }
+
+  if (lastError) {
+    logger.error("Payment indexing failed; ledger cursor not advanced", {
+      wallet_public_key: walletPublicKey,
+      campaign_id: campaignId,
+      tx_hash: record?.transaction_hash,
+      cursor: token,
+      error: lastError.message,
+    });
+    sendAlert("Ledger monitor failed to index payment; cursor held for retry", {
+      campaign_id: campaignId,
+      wallet_public_key: walletPublicKey,
+      tx_hash: record?.transaction_hash,
+      error: lastError.message,
+    });
+    if (!stalledWallets.has(walletPublicKey)) {
+      stalledWallets.set(walletPublicKey, campaignId);
+      if (!opts.replay) {
+        scheduleStalledReplay(
+          campaignId,
+          walletPublicKey,
+          opts.replayDelayMs ?? STALLED_REPLAY_DELAY_MS,
+        );
+      }
+    }
+    return false;
+  }
+
+  if (token && (opts.replay || !stalledWallets.has(walletPublicKey))) {
+    try {
+      await saveCursor(campaignId, walletPublicKey, token);
+    } catch (e) {
+      logger.error("Failed to persist ledger cursor", {
+        wallet_public_key: walletPublicKey,
+        campaign_id: campaignId,
+        error: e.message,
+      });
+    }
+  }
+  return true;
 }
 
 async function handlePayment(campaignId, walletPublicKey, payment) {
@@ -362,6 +443,7 @@ async function handlePayment(campaignId, walletPublicKey, payment) {
       tx_hash: txHash,
       error: err.message,
     });
+    throw err;
   } finally {
     client.release();
   }
@@ -674,6 +756,7 @@ async function handlePayment(campaignId, walletPublicKey, payment) {
     startLedgerMonitor,
     watchCampaignWallet,
     handlePayment,
+    onPaymentRecord,
     reconcileCampaignBalances,
     getLedgerStreamHealth,
     addSSEClient,
