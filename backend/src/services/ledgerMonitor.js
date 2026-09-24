@@ -172,7 +172,8 @@ async function handlePayment(campaignId, walletPublicKey, payment) {
     return;
 
   const { rows: campaignRows } = await db.query(
-    "SELECT status FROM campaigns WHERE id = $1",
+    `SELECT status, asset_type, min_contribution, max_contribution, max_per_user
+     FROM campaigns WHERE id = $1`,
     [campaignId],
   );
   if (
@@ -181,9 +182,108 @@ async function handlePayment(campaignId, walletPublicKey, payment) {
   )
     return;
 
+  const campaign = campaignRows[0];
+
+  // ── 1. Asset-code validation ──────────────────────────────────────────────
+  // The destination asset must match what the campaign is denominated in.
   const destinationAsset =
     payment.asset_type === "native" ? "XLM" : payment.asset_code;
+
+  if (destinationAsset !== campaign.asset_type) {
+    logger.warn("handlePayment: foreign asset rejected", {
+      campaign_id: campaignId,
+      expected: campaign.asset_type,
+      received: destinationAsset,
+      tx_hash: payment.transaction_hash,
+    });
+    return;
+  }
+
+  // ── 2. Issuer validation for non-native assets ────────────────────────────
+  // Prevent spoofed tokens with the right code but a different issuer.
+  if (payment.asset_type !== "native") {
+    const { configuredAssets } = require("../config/stellar");
+    const expectedIssuer = configuredAssets[campaign.asset_type]?.issuer;
+    if (expectedIssuer && payment.asset_issuer !== expectedIssuer) {
+      logger.warn("handlePayment: mismatched asset issuer rejected", {
+        campaign_id: campaignId,
+        asset: campaign.asset_type,
+        expected_issuer: expectedIssuer,
+        received_issuer: payment.asset_issuer,
+        tx_hash: payment.transaction_hash,
+      });
+      return;
+    }
+  }
+
   const destinationAmount = parseFloat(payment.amount);
+
+  // ── 3. Intent check: tx must be a recorded contribution ───────────────────
+  // Only credit payments that originated through the CrowdPay contribution
+  // flow; this prevents attacker-crafted direct transfers from inflating
+  // raised_amount.
+  const txHash = payment.transaction_hash;
+  const { rows: intentRows } = await db.query(
+    `SELECT id FROM stellar_transactions WHERE tx_hash = $1 AND kind = 'contribution' LIMIT 1`,
+    [txHash],
+  );
+  if (!intentRows.length) {
+    logger.warn("handlePayment: payment not in stellar_transactions — skipped", {
+      campaign_id: campaignId,
+      tx_hash: txHash,
+    });
+    return;
+  }
+
+  // ── 4. Dust / per-contribution amount cap ─────────────────────────────────
+  const MIN_STROOP = 0.0000001;
+  const minContrib = campaign.min_contribution !== null
+    ? parseFloat(campaign.min_contribution)
+    : MIN_STROOP;
+  if (destinationAmount < minContrib) {
+    logger.warn("handlePayment: dust payment rejected", {
+      campaign_id: campaignId,
+      amount: destinationAmount,
+      min: minContrib,
+      tx_hash: txHash,
+    });
+    return;
+  }
+  if (
+    campaign.max_contribution !== null &&
+    destinationAmount > parseFloat(campaign.max_contribution)
+  ) {
+    logger.warn("handlePayment: payment exceeds max_contribution — rejected", {
+      campaign_id: campaignId,
+      amount: destinationAmount,
+      max: campaign.max_contribution,
+      tx_hash: txHash,
+    });
+    return;
+  }
+
+  // ── 5. Per-user cap ───────────────────────────────────────────────────────
+  if (campaign.max_per_user !== null) {
+    const { rows: userTotalRows } = await db.query(
+      `SELECT COALESCE(SUM(amount), 0) AS total
+       FROM contributions
+       WHERE campaign_id = $1 AND sender_public_key = $2`,
+      [campaignId, payment.from],
+    );
+    const existingTotal = parseFloat(userTotalRows[0].total);
+    if (existingTotal + destinationAmount > parseFloat(campaign.max_per_user)) {
+      logger.warn("handlePayment: per-user cap exceeded — rejected", {
+        campaign_id: campaignId,
+        sender: payment.from,
+        existing_total: existingTotal,
+        amount: destinationAmount,
+        max_per_user: campaign.max_per_user,
+        tx_hash: txHash,
+      });
+      return;
+    }
+  }
+
   const sourceAsset = payment.source_asset_type
     ? payment.source_asset_type === "native"
       ? "XLM"
@@ -200,7 +300,6 @@ async function handlePayment(campaignId, walletPublicKey, payment) {
   const paymentType = payment.type;
   const conversionRate =
     sourceAmount && destinationAmount ? destinationAmount / sourceAmount : null;
-  const txHash = payment.transaction_hash;
 
   const client = await db.connect();
   let postCommitHooks = null;
