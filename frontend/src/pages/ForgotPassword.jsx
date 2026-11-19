@@ -3,6 +3,8 @@ import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { api } from '../services/api';
 
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 export default function ForgotPassword() {
   const { t } = useTranslation();
   const [email, setEmail] = useState('');
@@ -12,11 +14,16 @@ export default function ForgotPassword() {
 
   async function handleSubmit(e) {
     e.preventDefault();
+    const trimmed = email.trim();
+    if (!trimmed || !EMAIL_REGEX.test(trimmed)) {
+      setError(t('forgotPassword.invalidEmail') || 'Please enter a valid email address');
+      return;
+    }
     setLoading(true);
     setError('');
     setMessage('');
     try {
-      const res = await api.forgotPassword({ email });
+      const res = await api.forgotPassword({ email: trimmed });
       setMessage(res.message);
     } catch (err) {
       setError(err.message);

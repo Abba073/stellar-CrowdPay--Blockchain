@@ -36,10 +36,8 @@ export default function NotFound() {
         <button type="button" className="btn-primary" onClick={handleGoBack}>
           ← Go back
         </button>
-        <Link to="/">
-          <button type="button" className="btn-secondary">
-            Back to home
-          </button>
+        <Link to="/" className="btn-secondary" style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>
+          Back to home
         </Link>
       </div>
     </main>
