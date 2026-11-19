@@ -30,6 +30,11 @@ export function parseAmountToStroops(input) {
   }
 
   const [intPart, fracPart = ''] = raw.split('.');
+  if (fracPart.length > MAX_DECIMALS) {
+    throw new Error(
+      `Invalid amount "${input}": expected a decimal number with at most ${MAX_DECIMALS} decimal places`
+    );
+  }
   const frac = (fracPart + '0'.repeat(MAX_DECIMALS)).slice(0, MAX_DECIMALS);
   return BigInt(intPart) * STROOPS_PER_UNIT + BigInt(frac || '0');
 }
@@ -53,6 +58,9 @@ export function formatStroops(stroops) {
  * given fee rate in basis points. Mirrors backend calculateFeeStroops().
  */
 export function calculateFee(amount, bps) {
+  if (!Number.isInteger(bps) || bps < 0 || bps > 10000) {
+    throw new Error(`Invalid fee rate (bps): expected an integer between 0 and 10000, got ${bps}`);
+  }
   const amountStroops = parseAmountToStroops(amount);
   const feeStroops = (amountStroops * BigInt(bps)) / 10000n;
   return {
