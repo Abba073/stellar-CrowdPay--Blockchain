@@ -15,6 +15,10 @@ const STROOPS_PER_UNIT = 10000000n;
 const MAX_DECIMALS = 7;
 const DECIMAL_NUMBER_RE = /^\d+(\.\d+)?$/;
 const FEE_DENOMINATOR = 10000n;
+// Largest value storable in a NUMERIC(20,7) column, expressed in stroops:
+// 20 total digits, 7 of them fractional => 13 integer digits, i.e. 10^20 - 1
+// scaled by 10^7 (9999999999999.9999999).
+const MAX_AMOUNT_STROOPS = 9999999999999999999n;
 
 /**
  * Thrown for malformed amounts. Carries status 422 / VALIDATION_ERROR and a
@@ -36,9 +40,10 @@ class InvalidAmountError extends Error {
  * Parse a decimal amount into stroops (BigInt).
  *
  * Accepts plain decimal strings (e.g. "10.5", "0.0000001") with at most 7
- * decimal places. Extra fractional digits are truncated toward zero, matching
- * NUMERIC(20,7) storage and avoiding float rounding. Scientific notation,
- * negatives, and non-numeric input throw.
+ * decimal places. More than 7 fractional digits are rejected rather than
+ * truncated, so a submitted value is never silently altered. Amounts that
+ * exceed the NUMERIC(20,7) column bound are also rejected. Scientific
+ * notation, negatives, and non-numeric input throw.
  */
 function parseAmountToStroops(input, field = 'amount') {
   let raw;
@@ -59,8 +64,21 @@ function parseAmountToStroops(input, field = 'amount') {
   }
 
   const [intPart, fracPart = ''] = raw.split('.');
-  const frac = (fracPart + '0'.repeat(MAX_DECIMALS)).slice(0, MAX_DECIMALS);
-  return BigInt(intPart) * STROOPS_PER_UNIT + BigInt(frac || '0');
+  if (fracPart.length > MAX_DECIMALS) {
+    throw new InvalidAmountError(
+      `${field} must have at most ${MAX_DECIMALS} decimal places`,
+      field,
+    );
+  }
+  const frac = fracPart.padEnd(MAX_DECIMALS, '0');
+  const stroops = BigInt(intPart) * STROOPS_PER_UNIT + BigInt(frac || '0');
+  if (stroops > MAX_AMOUNT_STROOPS) {
+    throw new InvalidAmountError(
+      `${field} exceeds the maximum allowed amount of 9999999999999.9999999`,
+      field,
+    );
+  }
+  return stroops;
 }
 
 /**
@@ -152,6 +170,7 @@ function normalizeAmount(input) {
 module.exports = {
   STROOPS_PER_UNIT,
   MAX_DECIMALS,
+  MAX_AMOUNT_STROOPS,
   InvalidAmountError,
   parseAmountToStroops,
   tryParseAmountToStroops,

@@ -39,11 +39,11 @@ function sanitizeInfoObject(info) {
 const addRequestId = winston.format((info) => {
   const { requestId } = getRequestContext();
   if (requestId) info.request_id = requestId;
-  return sanitizeInfoObject(info);
+  return info;
 });
 
 const redactSensitiveValues = winston.format((info) => {
-  return info;
+  return sanitizeInfoObject(info);
 });
 
 const DEFAULT_LEVEL = 'info';
