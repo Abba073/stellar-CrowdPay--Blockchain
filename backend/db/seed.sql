@@ -45,14 +45,7 @@ VALUES
     'admin',
     TRUE
   )
-ON CONFLICT (email) DO UPDATE
-SET
-  password_hash = EXCLUDED.password_hash,
-  name = EXCLUDED.name,
-  wallet_secret_encrypted = EXCLUDED.wallet_secret_encrypted,
-  wallet_type = EXCLUDED.wallet_type,
-  role = EXCLUDED.role,
-  is_admin = EXCLUDED.is_admin;
+ON CONFLICT (email) DO NOTHING;
 
 -- Insert mock campaigns
 INSERT INTO campaigns (id, creator_id, title, description, target_amount, raised_amount, asset_type, wallet_public_key, status, deadline)
@@ -67,7 +60,7 @@ VALUES
     'USDC',
     'GDDT53Q2XW4UXFK2JX7GQW7OH7MZBLU6SOO6OP4N3T6QY57K3WKN2X2L',
     'active',
-    '2026-07-15'
+    NOW() + INTERVAL '30 days'
   ),
   (
     '22222222-2222-2222-2222-222222222222',
@@ -79,7 +72,7 @@ VALUES
     'USDC',
     'GBW6WQ3D2R7AOB2T6SXY5IKT2E3FKE3LHLRPF3N3VQGJHRKAHWJZXWQJ',
     'funded',
-    '2026-05-30'
+    NOW() + INTERVAL '45 days'
   ),
   (
     '33333333-3333-3333-3333-333333333333',
@@ -91,7 +84,7 @@ VALUES
     'XLM',
     'GATLEKJ6A4N5LG3JXG6JQWJPO2V7DNU7C43E2C7ERKJPFK5MCR7MVEQ6',
     'active',
-    '2026-08-20'
+    NOW() + INTERVAL '60 days'
   ),
   (
     '44444444-4444-4444-4444-444444444444',
@@ -103,7 +96,7 @@ VALUES
     'USDC',
     'GDW4P5M7H2QQFXPZV2WCKWAZ5FQY5N7IKB3Y7N4OFU7QJDSO46LQNG7O',
     'in_progress',
-    '2026-04-10'
+    NOW() + INTERVAL '90 days'
   )
 ON CONFLICT (id) DO UPDATE
 SET
@@ -114,6 +107,40 @@ SET
   asset_type = EXCLUDED.asset_type,
   status = EXCLUDED.status,
   deadline = EXCLUDED.deadline;
+
+-- Insert campaign owner memberships for the seeded creator so demo campaigns
+-- can be managed (e.g. withdrawals require an accepted owner row).
+INSERT INTO campaign_members (campaign_id, user_id, email, role, accepted_at)
+VALUES
+  (
+    '11111111-1111-1111-1111-111111111111',
+    '00000000-0000-0000-0000-000000000002',
+    'bola@example.com',
+    'owner',
+    NOW()
+  ),
+  (
+    '22222222-2222-2222-2222-222222222222',
+    '00000000-0000-0000-0000-000000000002',
+    'bola@example.com',
+    'owner',
+    NOW()
+  ),
+  (
+    '33333333-3333-3333-3333-333333333333',
+    '00000000-0000-0000-0000-000000000002',
+    'bola@example.com',
+    'owner',
+    NOW()
+  ),
+  (
+    '44444444-4444-4444-4444-444444444444',
+    '00000000-0000-0000-0000-000000000002',
+    'bola@example.com',
+    'owner',
+    NOW()
+  )
+ON CONFLICT DO NOTHING;
 
 -- Insert mock campaign updates
 INSERT INTO campaign_updates (id, campaign_id, author_id, title, body, created_at)
