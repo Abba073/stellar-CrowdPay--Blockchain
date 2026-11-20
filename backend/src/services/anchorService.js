@@ -156,8 +156,24 @@ function publicAnchorInfo(anchor) {
   };
 }
 
+const SEP_TIMEOUT_MS = 9000;
+
 async function fetchJson(url, options = {}) {
-  const response = await fetch(url, options);
+  let response;
+  try {
+    response = await fetch(url, {
+      ...options,
+      signal: AbortSignal.timeout(SEP_TIMEOUT_MS),
+    });
+  } catch (err) {
+    if (err.name === 'AbortError' || err.name === 'TimeoutError') {
+      const error = new Error('Anchor request timed out');
+      error.statusCode = 502;
+      error.payload = { code: 'ANCHOR_TIMEOUT', retryable: true };
+      throw error;
+    }
+    throw err;
+  }
   const text = await response.text();
   let data = {};
   if (text) {

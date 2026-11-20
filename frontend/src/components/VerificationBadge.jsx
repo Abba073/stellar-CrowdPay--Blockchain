@@ -2,7 +2,9 @@ import React from 'react';
 
 export default function VerificationBadge({ status, compact = false }) {
   if (status === 'verified') {
-    return <span style={compact ? styles.verifiedCompact : styles.verified}>✓ Verified Creator</span>;
+    return (
+      <span style={compact ? styles.verifiedCompact : styles.verified}>✓ Verified Creator</span>
+    );
   }
 
   return <span style={compact ? styles.warningCompact : styles.warning}>Unverified creator</span>;

@@ -31,14 +31,45 @@ const {
   CUSTODIAL_ACCOUNT_BASE_RESERVE_XLM,
   CUSTODIAL_ACCOUNT_PER_TRUSTLINE_XLM,
 } = require("../config/constants");
+const {
+  horizonBreaker,
+  CircuitOpenError,
+} = require("../utils/circuitBreaker");
+
+/**
+ * Run a Horizon call through the shared circuit breaker.
+ * When the breaker is open this rejects immediately with CircuitOpenError
+ * instead of blocking the request thread until the Horizon timeout.
+ */
+function withHorizonBreaker(fn) {
+  return horizonBreaker.execute(fn);
+}
 
 const PLATFORM_KEYPAIR = Keypair.fromSecret(process.env.PLATFORM_SECRET_KEY);
 
+const {
+  parseAmountToStroops,
+  formatStroops,
+  calculateFeeStroops,
+  getPlatformFeeBps,
+} = require('../utils/amounts');
+
+/**
+ * Compute the platform fee split for a contribution using exact stroop math.
+ * Returns decimal strings (never floats) plus the stroop quantities so callers
+ * can branch on exact values. Guarantees fee + campaign amount == amount.
+ */
 function calcFee(amount) {
-  const bps = parseInt(process.env.PLATFORM_FEE_BPS || '0', 10);
-  const fee = parseFloat((parseFloat(amount) * bps / 10000).toFixed(7));
-  const net = parseFloat((parseFloat(amount) - fee).toFixed(7));
-  return { feeAmount: fee, campaignAmount: net, bps };
+  const bps = getPlatformFeeBps();
+  const amountStroops = parseAmountToStroops(amount);
+  const { feeStroops, netStroops } = calculateFeeStroops(amountStroops, bps);
+  return {
+    feeAmount: formatStroops(feeStroops),
+    campaignAmount: formatStroops(netStroops),
+    feeStroops,
+    campaignStroops: netStroops,
+    bps,
+  };
 }
 
 function toStellarAsset(assetCode) {
@@ -80,7 +111,7 @@ function suggestedFundingXlmForCustodialAccount(trustlineCount) {
 
 async function accountExistsOnLedger(publicKey) {
   try {
-    await server.loadAccount(publicKey);
+    await withHorizonBreaker(() => server.loadAccount(publicKey));
     return true;
   } catch (err) {
     const status = err?.response?.status;
@@ -98,7 +129,9 @@ async function fundCustodialAccountFromPlatformIfNeeded(publicKey) {
   if (await accountExistsOnLedger(publicKey)) return false;
   const trustlineCount = listCreditAssetCodes().length;
   const startingBalance = suggestedFundingXlmForCustodialAccount(trustlineCount);
-  const platformAccount = await server.loadAccount(PLATFORM_KEYPAIR.publicKey());
+  const platformAccount = await withHorizonBreaker(() =>
+    server.loadAccount(PLATFORM_KEYPAIR.publicKey())
+  );
   const tx = new TransactionBuilder(platformAccount, {
     fee: BASE_FEE,
     networkPassphrase,
@@ -113,7 +146,7 @@ async function fundCustodialAccountFromPlatformIfNeeded(publicKey) {
     .build();
 
   tx.sign(PLATFORM_KEYPAIR);
-  await server.submitTransaction(tx);
+  await withHorizonBreaker(() => server.submitTransaction(tx));
   return true;
 }
 
@@ -123,7 +156,9 @@ async function fundCustodialAccountFromPlatformIfNeeded(publicKey) {
  */
 async function submitMissingTrustlinesForCustodialAccount(signerSecret) {
   const keypair = Keypair.fromSecret(signerSecret);
-  const account = await server.loadAccount(keypair.publicKey());
+  const account = await withHorizonBreaker(() =>
+    server.loadAccount(keypair.publicKey())
+  );
   const builder = new TransactionBuilder(account, {
     fee: BASE_FEE,
     networkPassphrase,
@@ -141,7 +176,7 @@ async function submitMissingTrustlinesForCustodialAccount(signerSecret) {
 
   const tx = builder.setTimeout(TX_TIMEOUT_CONTRIBUTION_S).build();
   tx.sign(keypair);
-  const result = await server.submitTransaction(tx);
+  const result = await withHorizonBreaker(() => server.submitTransaction(tx));
   return result.hash;
 }
 
@@ -168,7 +203,9 @@ function normalizeAsset(record) {
  */
 async function createCampaignWallet(creatorPublicKey) {
   const campaignKeypair = Keypair.random();
-  const platformAccount = await server.loadAccount(PLATFORM_KEYPAIR.publicKey());
+  const platformAccount = await withHorizonBreaker(() =>
+    server.loadAccount(PLATFORM_KEYPAIR.publicKey())
+  );
 
   const creditCodes = listCreditAssetCodes();
   const campaignStartingBalance = suggestedFundingXlmForCustodialAccount(creditCodes.length + 1);
@@ -187,10 +224,12 @@ async function createCampaignWallet(creatorPublicKey) {
     .build();
 
   tx.sign(PLATFORM_KEYPAIR);
-  await server.submitTransaction(tx);
+  await withHorizonBreaker(() => server.submitTransaction(tx));
 
   // Now configure the campaign account: trustline + multisig
-  const campaignAccount = await server.loadAccount(campaignKeypair.publicKey());
+  const campaignAccount = await withHorizonBreaker(() =>
+    server.loadAccount(campaignKeypair.publicKey())
+  );
 
   const setupBuilder = new TransactionBuilder(campaignAccount, {
     fee: BASE_FEE,
@@ -224,7 +263,7 @@ async function createCampaignWallet(creatorPublicKey) {
     .build();
 
   setupTx.sign(campaignKeypair);
-  await server.submitTransaction(setupTx);
+  await withHorizonBreaker(() => server.submitTransaction(setupTx));
 
   return {
     publicKey: campaignKeypair.publicKey(),
@@ -242,28 +281,32 @@ async function buildUnsignedContributionPayment({
   amount,
   memo,
 }) {
-  const senderAccount = await server.loadAccount(senderPublicKey);
+  const senderAccount = await withHorizonBreaker(() =>
+    server.loadAccount(senderPublicKey)
+  );
   const stellarAsset = toStellarAsset(asset);
-  const { feeAmount, campaignAmount } = calcFee(amount);
+  const { feeAmount, campaignAmount, feeStroops } = calcFee(amount);
 
   const builder = new TransactionBuilder(senderAccount, { fee: BASE_FEE, networkPassphrase })
     .addOperation(
       Operation.payment({
         destination: destinationPublicKey,
         asset: stellarAsset,
-        amount: String(campaignAmount),
+        amount: campaignAmount,
       })
     );
 
-  if (feeAmount > 0) {
+  if (feeStroops > 0n) {
     builder.addOperation(
       Operation.payment({
         destination: PLATFORM_KEYPAIR.publicKey(),
         asset: stellarAsset,
-        amount: String(feeAmount),
+        amount: feeAmount,
       })
     );
   }
+
+  if (memo) builder.addMemo(Memo.text(memo));
 
   const tx = builder.setTimeout(TX_TIMEOUT_CONTRIBUTION_S).build();
   return tx.toXDR();
@@ -315,43 +358,49 @@ async function buildUnsignedContributionPathPayment({
   destAssetCode,
   memo,
 }) {
-  const senderAccount = await server.loadAccount(senderPublicKey);
+  const senderAccount = await withHorizonBreaker(() =>
+    server.loadAccount(senderPublicKey)
+  );
   const sourceStellarAsset = toStellarAsset(sendAsset);
   const destStellarAsset = toStellarAsset(destAssetCode);
-  const { feeAmount, campaignAmount, bps } = calcFee(destAmount);
+  const { feeAmount, campaignAmount, feeStroops, bps } = calcFee(destAmount);
 
-  const sendMaxFloat = parseFloat(sendMax);
-  const campaignSendMax = feeAmount > 0
-    ? ((sendMaxFloat * (1 - bps / 10000)).toFixed(7))
-    : sendMax;
-  const feeSendMax = feeAmount > 0
-    ? ((sendMaxFloat * (bps / 10000)).toFixed(7))
-    : '0';
+  // Split the send asset amount into campaign + fee using the same exact
+  // stroop math as calcFee, so campaign sendMax + fee sendMax == sendMax.
+  const sendMaxStroops = parseAmountToStroops(sendMax);
+  const {
+    feeStroops: feeSendMaxStroops,
+    netStroops: campaignSendMaxStroops,
+  } = calculateFeeStroops(sendMaxStroops, bps);
+  const campaignSendMax = formatStroops(campaignSendMaxStroops);
+  const feeSendMax = formatStroops(feeSendMaxStroops);
 
   const builder = new TransactionBuilder(senderAccount, { fee: BASE_FEE, networkPassphrase })
     .addOperation(
       Operation.pathPaymentStrictReceive({
         sendAsset: sourceStellarAsset,
-        sendMax: String(campaignSendMax),
+        sendMax: campaignSendMax,
         destination: destinationPublicKey,
         destAsset: destStellarAsset,
-        destAmount: String(campaignAmount),
+        destAmount: campaignAmount,
         path: [],
       })
     );
 
-  if (feeAmount > 0) {
+  if (feeStroops > 0n) {
     builder.addOperation(
       Operation.pathPaymentStrictReceive({
         sendAsset: sourceStellarAsset,
-        sendMax: String(feeSendMax),
+        sendMax: feeSendMax,
         destination: PLATFORM_KEYPAIR.publicKey(),
         destAsset: destStellarAsset,
-        destAmount: String(feeAmount),
+        destAmount: feeAmount,
         path: [],
       })
     );
   }
+
+  if (memo) builder.addMemo(Memo.text(memo));
 
   const tx = builder.setTimeout(TX_TIMEOUT_CONTRIBUTION_S).build();
   return tx.toXDR();
@@ -407,9 +456,11 @@ async function getPathPaymentQuote({ sendAsset, destAsset, destAmount }) {
   const sourceStellarAsset = toStellarAsset(sendAsset);
   const destinationStellarAsset = toStellarAsset(destAsset);
 
-  const response = await server
-    .strictReceivePaths(sourceStellarAsset, destinationStellarAsset, String(destAmount))
-    .call();
+  const response = await withHorizonBreaker(() =>
+    server
+      .strictReceivePaths(sourceStellarAsset, destinationStellarAsset, String(destAmount))
+      .call()
+  );
 
   return (response.records || []).map((record) => ({
     source_asset: normalizeAsset({
@@ -427,6 +478,56 @@ async function getPathPaymentQuote({ sendAsset, destAsset, destAmount }) {
 }
 
 /**
+ * Validate a single withdrawal entry (amount, asset, destination).
+ * Also verifies the campaign wallet holds sufficient balance when `balances` is supplied.
+ *
+ * @param {object} params
+ * @param {string|number} params.amount
+ * @param {string}        params.asset
+ * @param {string}        params.destinationPublicKey
+ * @param {object}        [params.balances]  - map from getCampaignBalance(); optional
+ * @throws {Error} with a descriptive message when a constraint is violated
+ */
+function validateWithdrawalParams({ amount, asset, destinationPublicKey, balances }) {
+  // --- destination key ---
+  try {
+    Keypair.fromPublicKey(destinationPublicKey);
+  } catch {
+    throw new Error(`Invalid destination public key: ${destinationPublicKey}`);
+  }
+
+  // --- asset ---
+  if (!configuredAssets[asset]) {
+    throw new Error(`Unsupported asset: ${asset}. Supported: ${Object.keys(configuredAssets).join(', ')}`);
+  }
+
+  // --- amount: must be a positive finite number with at most 7 decimal places ---
+  const parsed = Number(amount);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`Amount must be a positive number, got: ${amount}`);
+  }
+  const amountStr = String(amount);
+  const dotIdx = amountStr.indexOf('.');
+  if (dotIdx !== -1 && amountStr.length - dotIdx - 1 > 7) {
+    throw new Error(`Amount exceeds 7 decimal places (Stellar stroops limit): ${amount}`);
+  }
+  // Dust check: minimum one stroop (0.0000001)
+  if (parsed < 0.0000001) {
+    throw new Error(`Amount is below the minimum stroop (0.0000001): ${amount}`);
+  }
+
+  // --- balance cover ---
+  if (balances) {
+    const available = parseFloat(balances[asset] || '0');
+    if (parsed > available) {
+      throw new Error(
+        `Insufficient balance: requested ${parsed} ${asset} but wallet only holds ${available} ${asset}`
+      );
+    }
+  }
+}
+
+/**
  * Build a withdrawal transaction for a campaign wallet.
  * Returns the unsigned XDR — both the creator and platform must sign it.
  */
@@ -436,7 +537,21 @@ async function buildWithdrawalTransaction({
   amount,
   asset,
 }) {
-  const campaignAccount = await server.loadAccount(campaignWalletPublicKey);
+  // Validate before hitting the network so callers get a fast, descriptive error.
+  validateWithdrawalParams({ amount, asset, destinationPublicKey });
+
+  const campaignAccount = await withHorizonBreaker(() =>
+    server.loadAccount(campaignWalletPublicKey)
+  );
+
+  // Verify the on-chain balance actually covers the requested amount.
+  const balances = {};
+  for (const b of campaignAccount.balances) {
+    const key = b.asset_type === 'native' ? 'XLM' : b.asset_code;
+    balances[key] = b.balance;
+  }
+  validateWithdrawalParams({ amount, asset, destinationPublicKey, balances });
+
   const stellarAsset = toStellarAsset(asset);
 
   const tx = new TransactionBuilder(campaignAccount, {
@@ -464,7 +579,36 @@ async function buildBatchRefundTransaction({
   campaignWalletPublicKey,
   refunds,
 }) {
-  const campaignAccount = await server.loadAccount(campaignWalletPublicKey);
+  if (!Array.isArray(refunds) || refunds.length === 0) {
+    throw new Error('refunds must be a non-empty array');
+  }
+
+  const campaignAccount = await withHorizonBreaker(() =>
+    server.loadAccount(campaignWalletPublicKey)
+  );
+
+  // Build a balance map once so we can check each refund against real on-chain holdings.
+  const balances = {};
+  for (const b of campaignAccount.balances) {
+    const key = b.asset_type === 'native' ? 'XLM' : b.asset_code;
+    balances[key] = b.balance;
+  }
+
+  // Validate all entries up-front — reject the whole batch if any entry is invalid.
+  for (let i = 0; i < refunds.length; i++) {
+    const refund = refunds[i];
+    try {
+      validateWithdrawalParams({
+        amount: refund.amount,
+        asset: refund.asset,
+        destinationPublicKey: refund.destinationPublicKey,
+        balances,
+      });
+    } catch (err) {
+      throw new Error(`refunds[${i}]: ${err.message}`);
+    }
+  }
+
   const builder = new TransactionBuilder(campaignAccount, {
     fee: BASE_FEE,
     networkPassphrase,
@@ -489,7 +633,7 @@ async function buildBatchRefundTransaction({
 }
 
 async function getAccountMultisigConfig(publicKey) {
-  const account = await server.loadAccount(publicKey);
+  const account = await withHorizonBreaker(() => server.loadAccount(publicKey));
   return {
     thresholds: account.thresholds,
     signers: account.signers || [],
@@ -524,7 +668,7 @@ function isXdrExpired(xdr) {
 
 async function submitPreparedTransaction(xdr) {
   const tx = TransactionBuilder.fromXDR(xdr, networkPassphrase);
-  const result = await server.submitTransaction(tx);
+  const result = await withHorizonBreaker(() => server.submitTransaction(tx));
   return result.hash;
 }
 
@@ -532,11 +676,33 @@ async function submitSignedWithdrawal({ xdr }) {
   return submitPreparedTransaction(xdr);
 }
 
+/** Deterministic transaction hash for an XDR envelope (independent of signatures). */
+function getTransactionHash(xdr) {
+  return TransactionBuilder.fromXDR(xdr, networkPassphrase).hash().toString('hex');
+}
+
+/**
+ * Check Horizon for a transaction by hash.
+ * Returns true if it landed, false if Horizon reports 404, and throws for any other error
+ * so callers can treat the outcome as unknown rather than "not submitted".
+ */
+async function transactionExistsOnHorizon(hash) {
+  try {
+    await withHorizonBreaker(() =>
+      server.transactions().transaction(hash).call()
+    );
+    return true;
+  } catch (err) {
+    if (err?.response?.status === 404 || err?.name === 'NotFoundError') return false;
+    throw err;
+  }
+}
+
 /**
  * Get the current balance of a campaign wallet.
  */
 async function getCampaignBalance(publicKey) {
-  const account = await server.loadAccount(publicKey);
+  const account = await withHorizonBreaker(() => server.loadAccount(publicKey));
   const balances = {};
   for (const b of account.balances) {
     const key = b.asset_type === 'native' ? 'XLM' : b.asset_code;
@@ -571,11 +737,13 @@ function recoverWalletFromSecret(secret) {
  * Get transaction history for a campaign wallet.
  */
 async function getWalletTransactionHistory(publicKey, limit = 50) {
-  const txs = await server.transactions()
-    .forAccount(publicKey)
-    .order('desc')
-    .limit(limit)
-    .call();
+  const txs = await withHorizonBreaker(() =>
+    server.transactions()
+      .forAccount(publicKey)
+      .order('desc')
+      .limit(limit)
+      .call()
+  );
   
   return txs.records.map(tx => ({
     hash: tx.hash,
@@ -591,11 +759,13 @@ async function getWalletTransactionHistory(publicKey, limit = 50) {
  * Get payment operations for a campaign wallet (audit trail).
  */
 async function getWalletPayments(publicKey, limit = 100) {
-  const payments = await server.payments()
-    .forAccount(publicKey)
-    .order('desc')
-    .limit(limit)
-    .call();
+  const payments = await withHorizonBreaker(() =>
+    server.payments()
+      .forAccount(publicKey)
+      .order('desc')
+      .limit(limit)
+      .call()
+  );
   
   return payments.records.map(p => ({
     id: p.id,
@@ -641,16 +811,21 @@ module.exports = {
   buildUnsignedContributionPathPayment,
   prepareSignedContributionPayment,
   prepareSignedContributionPathPayment,
+  calcFee,
   submitPayment,
   submitPathPayment,
   submitPreparedTransaction,
+  submitWithFeeBumpFallback,
   getPathPaymentQuote,
+  validateWithdrawalParams,
   buildWithdrawalTransaction,
   getAccountMultisigConfig,
   signTransactionXdr,
   signatureCountFromXdr,
   isXdrExpired,
   submitSignedWithdrawal,
+  getTransactionHash,
+  transactionExistsOnHorizon,
   recoverWalletFromSecret,
   getWalletTransactionHistory,
   getWalletPayments,
@@ -659,5 +834,8 @@ module.exports = {
   friendbotFund,
   buildBatchRefundTransaction,
   isBadSequenceError,
+  horizonBreaker,
+  CircuitOpenError,
+  isCircuitOpen: () => horizonBreaker.isOpen(),
   PLATFORM_PUBLIC_KEY: PLATFORM_KEYPAIR.publicKey(),
 };

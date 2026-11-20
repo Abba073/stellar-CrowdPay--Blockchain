@@ -2,9 +2,20 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const db = require('../config/database');
 const Sentry = require('@sentry/node');
+const { sendErrorResponse } = require('./errorHandler');
 
 function apiKeyPepper() {
-  return process.env.API_KEY_PEPPER || process.env.JWT_SECRET || 'dev-api-key-pepper';
+  const pepper = process.env.API_KEY_PEPPER;
+  if (!pepper) {
+    // This should never be reached in production because validateEnv() in
+    // config/env.js fails the process at startup when API_KEY_PEPPER is unset.
+    // In tests the value is injected via the test environment.
+    throw new Error(
+      'API_KEY_PEPPER environment variable is required. ' +
+      'Set a dedicated secret independent of JWT_SECRET to prevent credential cross-contamination.'
+    );
+  }
+  return pepper;
 }
 
 function hashApiKey(rawKey) {
@@ -34,15 +45,24 @@ async function authenticate(req) {
     req.user = payload;
     req.auth = { kind: 'jwt', scopes: null };
     
-    // Load admin status from database
+    // Load admin status and validate token_version from database
     if (req.user.userId) {
       const { rows } = await db.query(
-        'SELECT is_admin, is_banned FROM users WHERE id = $1',
+        'SELECT role, is_admin, is_super_admin, is_banned, token_version FROM users WHERE id = $1',
         [req.user.userId]
       );
       if (rows.length) {
+        req.user.role = rows[0].role;
         req.user.is_admin = rows[0].is_admin;
+        req.user.is_super_admin = rows[0].is_super_admin;
         req.user.is_banned = rows[0].is_banned;
+
+        // Reject access tokens issued before the last password reset
+        const dbVersion = rows[0].token_version ?? 0;
+        const tokenVersion = payload.tv ?? 0;
+        if (tokenVersion < dbVersion) {
+          throw new Error('Token invalidated by password reset');
+        }
       }
     }
   } catch {
@@ -52,7 +72,14 @@ async function authenticate(req) {
 
 function requireAdmin(req, res, next) {
   if (!req.user || !req.user.is_admin) {
-    return res.status(403).json({ error: 'Requires admin privileges' });
+    return sendErrorResponse(res, 403, 'Requires admin privileges');
+  }
+  next();
+}
+
+function requireSuperAdmin(req, res, next) {
+  if (!req.user || !req.user.is_super_admin) {
+    return sendErrorResponse(res, 403, 'Requires super-admin privileges');
   }
   next();
 }
@@ -61,10 +88,10 @@ function requireRole(...roles) {
   const allowed = new Set(roles);
   return (req, res, next) => {
     if (!req.user || !req.user.role) {
-      return res.status(403).json({ error: 'Requires authenticated user role' });
+      return sendErrorResponse(res, 403, 'Requires authenticated user role');
     }
     if (!allowed.has(req.user.role)) {
-      return res.status(403).json({ error: 'Insufficient role for this action' });
+      return sendErrorResponse(res, 403, 'Insufficient role for this action');
     }
     next();
   };
@@ -84,7 +111,7 @@ function assertApiKeyScopes(req, res) {
 
   if (path.startsWith('/api/api-keys') || path.startsWith('/api/webhooks')) {
     if (!scopes.includes('developer')) {
-      res.status(403).json({ error: 'API key requires developer scope for this resource' });
+      sendErrorResponse(res, 403, 'API key requires developer scope for this resource');
       return false;
     }
     return true;
@@ -93,13 +120,13 @@ function assertApiKeyScopes(req, res) {
   if (path.startsWith('/api/withdrawals')) {
     if (method === 'GET') {
       if (!scopes.includes('read')) {
-        res.status(403).json({ error: 'API key requires read scope' });
+        sendErrorResponse(res, 403, 'API key requires read scope');
         return false;
       }
       return true;
     }
     if (!scopes.includes('withdrawals')) {
-      res.status(403).json({ error: 'API key requires withdrawals scope for withdrawal actions' });
+      sendErrorResponse(res, 403, 'API key requires withdrawals scope for withdrawal actions');
       return false;
     }
     return true;
@@ -107,14 +134,14 @@ function assertApiKeyScopes(req, res) {
 
   if (method === 'GET' || method === 'HEAD') {
     if (!scopes.includes('read')) {
-      res.status(403).json({ error: 'API key requires read scope' });
+      sendErrorResponse(res, 403, 'API key requires read scope');
       return false;
     }
     return true;
   }
 
   if (!scopes.includes('write')) {
-    res.status(403).json({ error: 'API key requires write scope' });
+    sendErrorResponse(res, 403, 'API key requires write scope');
     return false;
   }
   return true;
@@ -123,21 +150,45 @@ function assertApiKeyScopes(req, res) {
 function requireAuth(req, res, next) {
   authenticate(req)
     .then(() => {
+      // #15 — Enforce the banned flag. is_banned is re-read from DB in
+      // authenticate() so bans take effect immediately on every request.
+      // Admins are exempt so that platform staff can still access the system
+      // to investigate and manage banned accounts.
+      if (req.user?.is_banned && !req.user?.is_admin) {
+        return sendErrorResponse(res, 403, 'Your account has been suspended');
+      }
       if (!assertApiKeyScopes(req, res)) return;
       if (req.user?.userId) Sentry.setUser({ id: req.user.userId });
       next();
     })
     .catch((err) => {
       const msg = err.message === 'Missing token' ? err.message : 'Unauthorized';
-      res.status(401).json({ error: msg });
+      sendErrorResponse(res, 401, msg);
+    });
+}
+
+/**
+ * Middleware that attempts authentication but does not reject unauthenticated requests.
+ * Sets req.user if a valid token is present; leaves req.user undefined otherwise.
+ */
+function optionalAuth(req, res, next) {
+  authenticate(req)
+    .then(() => {
+      next();
+    })
+    .catch(() => {
+      // No token or invalid token — continue as anonymous
+      next();
     });
 }
 
 module.exports = {
   requireAuth,
+  optionalAuth,
   authenticate,
   assertApiKeyScopes,
   hashApiKey,
   requireAdmin,
+  requireSuperAdmin,
   requireRole,
 };

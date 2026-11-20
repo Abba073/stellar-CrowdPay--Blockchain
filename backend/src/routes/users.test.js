@@ -30,7 +30,10 @@ function buildApp({ queryImpl, stellarImpl, sendEmailImpl, bcryptImpl } = {}) {
     '../services/walletSecrets': {
       encryptWalletSecret: async (secret) => `cpws:v1:${secret.slice(0, 8)}`,
     },
-    '../services/emailService': { sendEmail },
+    '../services/emailService': { sendEmail, reserveEmailSend: async () => true },
+    '../services/kycProvider': {
+      isKycRequiredForCampaigns: () => false,
+    },
     '../middleware/auth': {
       requireAuth: (_req, _res, next) => next(),
     },
@@ -209,7 +212,7 @@ test('POST /api/auth/reset-password updates password and revokes refresh tokens'
     .send({ token: 'raw-reset-token', password: 'Newpassword1' });
 
   assert.equal(res.status, 200);
-  assert.equal(res.body.message, 'Password reset successfully');
+  assert.match(res.body.message, /Password reset successfully/);
   assert.equal(updatedPassword, true);
   assert.equal(markedUsed, true);
   assert.equal(revokedRefresh, true);
@@ -231,7 +234,7 @@ test('POST /api/auth/reset-password returns 400 for invalid or expired token', a
 
   assert.equal(res.status, 400);
   assert.equal(
-    res.body.error,
+    res.body.error.message,
     'Invalid or expired reset link. Please request a new one.'
   );
 });
@@ -267,5 +270,5 @@ test('POST /api/auth/login rejects old password after reset', async () => {
     .send({ email: 'user@example.com', password: 'Oldpassword1' });
 
   assert.equal(res.status, 401);
-  assert.equal(res.body.error, 'Invalid credentials');
+  assert.equal(res.body.error.message, 'Invalid credentials');
 });

@@ -1,0 +1,43 @@
+name: Bug report
+description: Something in CrowdPay is broken.
+title: "fix: <short description>"
+labels: ["bug", "needs-triage"]
+body:
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Files, routes, or pages involved (if known).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What happens, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. docker compose up
+        2. Open http://localhost:5173/...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      render: shell
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: How a reviewer confirms the fix.
+      value: |
+        - [ ] The steps above no longer reproduce the bug
+        - [ ] A regression test covers this case
+        - [ ] `npm test` passes in `backend/` and `frontend/`
+    validations:
+      required: true

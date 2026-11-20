@@ -10,6 +10,7 @@ function buildActions(overrides = {}) {
     notifications: [],
     refunds: [],
     statusEvents: [],
+    alerts: [],
   };
 
   const actions = proxyquire('./campaignStatusActions', {
@@ -22,6 +23,10 @@ function buildActions(overrides = {}) {
           }
           calls.statusEvents.push(key);
           return { rows: [{ id: 'event-1' }] };
+        }
+        if (text.includes('DELETE FROM campaign_status_events')) {
+          calls.statusEvents = [];
+          return { rows: [] };
         }
         if (text.includes('FROM campaigns c') && text.includes('creator_email')) {
           return {
@@ -64,6 +69,9 @@ function buildActions(overrides = {}) {
       sendEmail: async (payload) => {
         calls.emails.push(payload);
       },
+      sendEmailSafe: async (payload) => {
+        calls.emails.push(payload);
+      },
     },
     './notifications': {
       createNotification: async (userId, payload) => {
@@ -90,6 +98,11 @@ function buildActions(overrides = {}) {
     },
     './sorobanService': {
       invokeContract: async () => 0,
+    },
+    './alerting': {
+      sendAlert: async (msg, ctx) => {
+        calls.alerts.push({ msg, ctx });
+      },
     },
     ...overrides.modules,
   });
@@ -187,3 +200,48 @@ test('recordStatusTransition is idempotent via unique constraint', async () => {
 
   assert.equal(calls.emails.length, 2);
 });
+
+test('downstream failure triggers alert and does not suppress subsequent replay', async () => {
+  let failFirstTime = true;
+  const { actions, calls } = buildActions({
+    modules: {
+      './emailService': {
+        sendEmail: async (payload) => {
+          if (failFirstTime) {
+            throw new Error('Simulated email service failure');
+          }
+          calls.emails.push(payload);
+        },
+        sendEmailSafe: async (payload) => {
+          if (failFirstTime) {
+            throw new Error('Simulated email service failure');
+          }
+          calls.emails.push(payload);
+        },
+      },
+    },
+  });
+
+  // First attempt should fail downstream and throw
+  await assert.rejects(
+    async () => {
+      await actions.triggerCampaignStatusActions({ id: 'camp-fail-1', status: 'funded' }, 'active');
+    },
+    /Simulated email service failure/
+  );
+
+  // Alert must have been sent
+  assert.equal(calls.alerts.length, 1);
+  assert.match(calls.alerts[0].msg, /failed/i);
+
+  // Status event must have been cleared from calls.statusEvents so replay is not suppressed
+  assert.equal(calls.statusEvents.length, 0);
+
+  // Replay should now succeed
+  failFirstTime = false;
+  await actions.triggerCampaignStatusActions({ id: 'camp-fail-1', status: 'funded' }, 'active');
+
+  assert.equal(calls.statusEvents.length, 1);
+  assert.equal(calls.emails.length, 2);
+});
+

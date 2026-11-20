@@ -2,6 +2,7 @@ const router = require('express').Router();
 const db = require('../config/database');
 const logger = require('../config/logger');
 const { requireAuth } = require('../middleware/auth');
+const { idempotency } = require('../middleware/idempotency');
 const { sendAlert } = require('../services/alerting');
 const { withdrawalValidation, validateRequest } = require('../middleware/validation');
 const {
@@ -10,6 +11,8 @@ const {
   signTransactionXdr,
   signatureCountFromXdr,
   submitSignedWithdrawal,
+  getTransactionHash,
+  transactionExistsOnHorizon,
   isXdrExpired,
   PLATFORM_PUBLIC_KEY,
 } = require('../services/stellarService');
@@ -18,10 +21,12 @@ const {
   finalizeWithdrawalSubmitted,
   markWithdrawalFailed,
 } = require('../services/stellarTransactionService');
-const { sendEmail } = require('../services/emailService');
+const { sendEmailSafe } = require('../services/emailService');
 const { emitWebhookEventForUser, WEBHOOK_EVENTS } = require('../services/webhookDispatcher');
 const { withDecryptedWalletSecret } = require('../services/walletSecrets');
 const { createNotification } = require('../services/notifications');
+const { getRequestContext } = require('../middleware/requestContext');
+const { sendErrorResponse } = require('../middleware/errorHandler');
 
 const ALLOWED_CAMPAIGN_STATUS_FOR_REQUEST = ['active', 'funded'];
 
@@ -33,7 +38,7 @@ function canPerformPlatformSignature(userId) {
 
 function requirePlatformApprover(req, res, next) {
   if (!canPerformPlatformSignature(req.user.userId)) {
-    return res.status(403).json({ error: 'Only the designated platform approver can perform this action' });
+    return sendErrorResponse(res, 403, 'Only the designated platform approver can perform this action');
   }
   next();
 }
@@ -49,13 +54,45 @@ function hasSigner(signers, publicKey) {
   return signers.some((s) => s.key === publicKey && s.weight >= 1);
 }
 
-async function logWithdrawalEvent(client, { withdrawalRequestId, actorUserId, action, note, metadata }) {
+/**
+ * Extract request attribution context (client IP, user-agent, request id) from an
+ * Express request so audit rows can be traced back to the originating request.
+ */
+function requestAuditContext(req) {
+  if (!req) return { actorIp: null, userAgent: null, requestId: null };
+  const ctx = getRequestContext() || {};
+  return {
+    actorIp: req.ip || null,
+    userAgent: (req.headers && req.headers['user-agent']) || null,
+    requestId: req.id || ctx.requestId || null,
+  };
+}
+
+async function logWithdrawalEvent(client, {
+  withdrawalRequestId,
+  actorUserId,
+  action,
+  note,
+  metadata,
+  actorIp,
+  userAgent,
+  requestId,
+}) {
   const runner = client || db;
   await runner.query(
     `INSERT INTO withdrawal_approval_events
-       (withdrawal_request_id, actor_user_id, action, note, metadata)
-     VALUES ($1, $2, $3, $4, $5::jsonb)`,
-    [withdrawalRequestId, actorUserId || null, action, note || null, metadata ? JSON.stringify(metadata) : null]
+       (withdrawal_request_id, actor_user_id, action, note, metadata, actor_ip, user_agent, request_id)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)`,
+    [
+      withdrawalRequestId,
+      actorUserId || null,
+      action,
+      note || null,
+      metadata ? JSON.stringify(metadata) : null,
+      actorIp || null,
+      userAgent || null,
+      requestId || null,
+    ]
   );
 }
 
@@ -93,7 +130,7 @@ router.get('/capabilities', requireAuth, (req, res) => {
   res.json({ can_approve_platform: canPerformPlatformSignature(req.user.userId) });
 });
 
-router.post('/request', requireAuth, withdrawalValidation, validateRequest, async (req, res) => {
+router.post('/request', requireAuth, idempotency, withdrawalValidation, validateRequest, async (req, res) => {
   /**
    * @openapi
    * /api/withdrawals/request:
@@ -131,22 +168,18 @@ router.post('/request', requireAuth, withdrawalValidation, validateRequest, asyn
      FROM campaigns WHERE id = $1`,
     [campaign_id]
   );
-  if (!campaigns.length) return res.status(404).json({ error: 'Campaign not found' });
+  if (!campaigns.length) return sendErrorResponse(res, 404, 'Campaign not found');
   const campaign = campaigns[0];
 
   const isOwner = await checkOwnerAccess(req, campaign_id);
   if (!isOwner) {
-    return res.status(403).json({ error: 'Only campaign owners can request withdrawals' });
+    return sendErrorResponse(res, 403, 'Only campaign owners can request withdrawals');
   }
   if (campaign.milestone_count > 0) {
-    return res.status(409).json({
-      error: 'This campaign uses milestone releases. Funds are released through approved milestones instead of manual withdrawals.',
-    });
+    return sendErrorResponse(res, 409, 'This campaign uses milestone releases. Funds are released through approved milestones instead of manual withdrawals.');
   }
   if (!ALLOWED_CAMPAIGN_STATUS_FOR_REQUEST.includes(campaign.status)) {
-    return res.status(409).json({
-      error: `Withdrawals cannot be requested while campaign status is "${campaign.status}".`,
-    });
+    return sendErrorResponse(res, 409, `Withdrawals cannot be requested while campaign status is "${campaign.status}".`);
   }
 
   // Block withdrawals while a dispute is open or under review
@@ -156,10 +189,7 @@ router.post('/request', requireAuth, withdrawalValidation, validateRequest, asyn
     [campaign_id]
   );
   if (activeDisputes.length) {
-    return res.status(403).json({
-      error: 'Withdrawals are blocked while an active dispute is open for this campaign.',
-      dispute_id: activeDisputes[0].id,
-    });
+    return sendErrorResponse(res, 403, 'Withdrawals are blocked while an active dispute is open for this campaign.', undefined, undefined, { dispute_id: activeDisputes[0].id });
   }
 
   const { rows: pending } = await db.query(
@@ -168,9 +198,7 @@ router.post('/request', requireAuth, withdrawalValidation, validateRequest, asyn
     [campaign_id]
   );
   if (pending.length) {
-    return res.status(409).json({
-      error: 'A pending withdrawal already exists for this campaign. Cancel it or wait for completion before opening another.',
-    });
+    return sendErrorResponse(res, 409, 'A pending withdrawal already exists for this campaign. Cancel it or wait for completion before opening another.');
   }
 
   const { rows: creatorRows } = await db.query(
@@ -179,23 +207,35 @@ router.post('/request', requireAuth, withdrawalValidation, validateRequest, asyn
   );
   const creatorPublicKey = creatorRows[0].wallet_public_key;
 
-  const multisig = await getAccountMultisigConfig(campaign.wallet_public_key);
-  if (
-    multisig.thresholds.med_threshold < 2 ||
-    !hasSigner(multisig.signers, creatorPublicKey) ||
-    !hasSigner(multisig.signers, PLATFORM_PUBLIC_KEY)
-  ) {
-    return res.status(422).json({
-      error: 'Campaign wallet multisig config invalid: creator + platform signatures are required',
-    });
-  }
+  let multisig;
+  let xdr;
+  try {
+    multisig = await getAccountMultisigConfig(campaign.wallet_public_key);
+    if (
+      multisig.thresholds.med_threshold < 2 ||
+      !hasSigner(multisig.signers, creatorPublicKey) ||
+      !hasSigner(multisig.signers, PLATFORM_PUBLIC_KEY)
+    ) {
+      return sendErrorResponse(res, 422, 'Campaign wallet multisig config invalid: creator + platform signatures are required');
+    }
 
-  const xdr = await buildWithdrawalTransaction({
-    campaignWalletPublicKey: campaign.wallet_public_key,
-    destinationPublicKey: destination_key,
-    amount,
-    asset: campaign.asset_type,
-  });
+    xdr = await buildWithdrawalTransaction({
+      campaignWalletPublicKey: campaign.wallet_public_key,
+      destinationPublicKey: destination_key,
+      amount,
+      asset: campaign.asset_type,
+    });
+  } catch (err) {
+    if (err instanceof CircuitOpenError) {
+      logger.warn('Withdrawal request blocked by Stellar circuit breaker', {
+        campaign_id,
+        error: err.message,
+      });
+      return sendErrorResponse(res, 503, CIRCUIT_OPEN_MESSAGE, undefined, undefined, { retryable: true });
+    }
+    logger.error('Withdrawal request Stellar preparation failed', { error: err.message, campaign_id });
+    return sendErrorResponse(res, 502, 'Could not prepare withdrawal transaction on Stellar');
+  }
 
   const client = await db.connect();
   try {
@@ -213,6 +253,7 @@ router.post('/request', requireAuth, withdrawalValidation, validateRequest, asyn
       action: 'requested',
       note: null,
       metadata: { amount, destination_key, asset_type: campaign.asset_type },
+      ...requestAuditContext(req),
     });
     await insertWithdrawalPendingSignatures(client, {
       campaignId: campaign_id,
@@ -230,7 +271,7 @@ router.post('/request', requireAuth, withdrawalValidation, validateRequest, asyn
   } catch (err) {
     await client.query('ROLLBACK');
     logger.error('Withdrawal request creation failed', { error: err.message, campaign_id });
-    res.status(500).json({ error: 'Could not create withdrawal request' });
+    sendErrorResponse(res, 500, 'Could not create withdrawal request');
   } finally {
     client.release();
   }
@@ -244,23 +285,21 @@ router.post('/:id/approve/creator', requireAuth, async (req, res) => {
      WHERE wr.id = $1`,
     [req.params.id]
   );
-  if (!requests.length) return res.status(404).json({ error: 'Withdrawal request not found' });
+  if (!requests.length) return sendErrorResponse(res, 404, 'Withdrawal request not found');
   const requestRow = requests[0];
 
   const isOwner = await checkOwnerAccess(req, requestRow.campaign_id);
   if (!isOwner) {
-    return res.status(403).json({ error: 'Only campaign owners can approve withdrawals' });
+    return sendErrorResponse(res, 403, 'Only campaign owners can approve withdrawals');
   }
   if (!requestRow.is_refund && !ALLOWED_CAMPAIGN_STATUS_FOR_REQUEST.includes(requestRow.campaign_status)) {
-    return res.status(409).json({
-      error: `Campaign status is "${requestRow.campaign_status}". Creator approval is not allowed.`,
-    });
+    return sendErrorResponse(res, 409, `Campaign status is "${requestRow.campaign_status}". Creator approval is not allowed.`);
   }
   if (requestRow.status !== 'pending') {
-    return res.status(409).json({ error: 'Withdrawal request is no longer pending' });
+    return sendErrorResponse(res, 409, 'Withdrawal request is no longer pending');
   }
   if (requestRow.creator_signed) {
-    return res.status(409).json({ error: 'Creator already approved this withdrawal' });
+    return sendErrorResponse(res, 409, 'Creator already approved this withdrawal');
   }
 
   const { rows: users } = await db.query(
@@ -273,13 +312,29 @@ router.post('/:id/approve/creator', requireAuth, async (req, res) => {
     if (userRow.wallet_type === 'freighter') {
       // Expect frontend to submit signed_xdr for freighter users
       const { signed_xdr } = req.body || {};
-      if (!signed_xdr) return res.status(400).json({ error: 'signed_xdr is required for freighter users' });
+      if (!signed_xdr) return sendErrorResponse(res, 400, 'signed_xdr is required for freighter users');
 
       // Validate the signed_xdr contains a valid signature from the creator's public key
+      // and strictly matches the withdrawal request destination and amount
       try {
-        // validate signature by verifying at least one signature matches user's public key
-        const tx = require('@stellar/stellar-sdk').TransactionBuilder.fromXDR(signed_xdr, require('../config/stellar').networkPassphrase);
-        const signer = require('@stellar/stellar-sdk').Keypair.fromPublicKey(userRow.wallet_public_key);
+        const StellarSdk = require('@stellar/stellar-sdk');
+        const { networkPassphrase } = require('../config/stellar');
+        const tx = StellarSdk.TransactionBuilder.fromXDR(signed_xdr, networkPassphrase);
+
+        if (!tx.operations || tx.operations.length !== 1 || tx.operations[0].type !== 'payment') {
+          return sendErrorResponse(res, 422, 'Signed transaction must contain exactly one payment operation');
+        }
+
+        const op = tx.operations[0];
+        if (op.destination !== requestRow.destination_key) {
+          return sendErrorResponse(res, 422, 'Signed transaction destination does not match withdrawal request');
+        }
+
+        if (parseFloat(op.amount) !== parseFloat(requestRow.amount)) {
+          return sendErrorResponse(res, 422, 'Signed transaction amount does not match withdrawal request');
+        }
+
+        const signer = StellarSdk.Keypair.fromPublicKey(userRow.wallet_public_key);
         const signatureValid = tx.signatures.some((decorated) => {
           try {
             return signer.verify(tx.hash(), decorated.signature());
@@ -288,10 +343,10 @@ router.post('/:id/approve/creator', requireAuth, async (req, res) => {
           }
         });
         if (!signatureValid) {
-          return res.status(422).json({ error: 'Signed transaction does not include a valid signature by the creator' });
+          return sendErrorResponse(res, 422, 'Signed transaction does not include a valid signature by the creator');
         }
       } catch (err) {
-        return res.status(422).json({ error: 'Invalid signed_xdr' });
+        return sendErrorResponse(res, 422, err.message || 'Invalid signed_xdr');
       }
 
       signedXdr = signed_xdr;
@@ -310,11 +365,18 @@ router.post('/:id/approve/creator', requireAuth, async (req, res) => {
       );
     }
   } catch (err) {
+    if (err instanceof CircuitOpenError) {
+      logger.warn('Creator withdrawal signing blocked by Stellar circuit breaker', {
+        withdrawal_id: req.params.id,
+        error: err.message,
+      });
+      return sendErrorResponse(res, 503, CIRCUIT_OPEN_MESSAGE, undefined, undefined, { retryable: true });
+    }
     logger.error('Creator withdrawal signing failed', {
       withdrawal_id: req.params.id,
       error: err.message,
     });
-    return res.status(503).json({ error: 'Creator wallet signing is unavailable; retry shortly.' });
+    return sendErrorResponse(res, 503, 'Creator wallet signing is unavailable; retry shortly.');
   }
 
   const client = await db.connect();
@@ -329,7 +391,7 @@ router.post('/:id/approve/creator', requireAuth, async (req, res) => {
     );
     if (!updated.length) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Withdrawal request changed; refresh and try again.' });
+      return sendErrorResponse(res, 409, 'Withdrawal request changed; refresh and try again.');
     }
     await logWithdrawalEvent(client, {
       withdrawalRequestId: req.params.id,
@@ -337,13 +399,14 @@ router.post('/:id/approve/creator', requireAuth, async (req, res) => {
       action: 'creator_signed',
       note: null,
       metadata: {},
+      ...requestAuditContext(req),
     });
     await client.query('COMMIT');
     res.json(updated[0]);
   } catch (err) {
     await client.query('ROLLBACK');
     logger.error('Creator approval recording failed', { withdrawal_id: req.params.id, error: err.message });
-    res.status(500).json({ error: 'Could not record creator approval' });
+    sendErrorResponse(res, 500, 'Could not record creator approval');
   } finally {
     client.release();
   }
@@ -378,30 +441,48 @@ const platformApproveHandler = async (req, res) => {
      WHERE wr.id = $1`,
     [req.params.id]
   );
-  if (!requests.length) return res.status(404).json({ error: 'Withdrawal request not found' });
+  if (!requests.length) return sendErrorResponse(res, 404, 'Withdrawal request not found');
   const requestRow = requests[0];
 
   if (!requestRow.is_refund && !ALLOWED_CAMPAIGN_STATUS_FOR_REQUEST.includes(requestRow.campaign_status)) {
-    return res.status(409).json({
-      error: `Campaign status is "${requestRow.campaign_status}". Platform release is blocked.`,
-    });
+    return sendErrorResponse(res, 409, `Campaign status is "${requestRow.campaign_status}". Platform release is blocked.`);
   }
   if (requestRow.status !== 'pending') {
-    return res.status(409).json({ error: 'Withdrawal request is no longer pending' });
+    return sendErrorResponse(res, 409, 'Withdrawal request is no longer pending');
   }
-  if (!requestRow.creator_signed) {
-    return res.status(409).json({ error: 'Creator approval is required before platform approval' });
+  // #16 — For platform-initiated refunds (failed campaigns and dispute resolutions)
+  // creator_signed is pre-set to TRUE at creation time, so this guard only applies
+  // to voluntary creator-initiated withdrawals where the creator must sign first.
+  if (!requestRow.is_refund && !requestRow.creator_signed) {
+    return sendErrorResponse(res, 409, 'Creator approval is required before platform approval');
   }
   if (requestRow.platform_signed) {
-    return res.status(409).json({ error: 'Platform already approved this withdrawal' });
+    return sendErrorResponse(res, 409, 'Platform already approved this withdrawal');
   }
 
   // Check whether the XDR time bounds have already elapsed before adding our signature.
   // If expired, tell the creator to re-request so a fresh XDR is built.
   if (isXdrExpired(requestRow.unsigned_xdr)) {
-    return res.status(410).json({
-      error: 'Withdrawal XDR has expired. The creator must cancel and submit a new withdrawal request.',
-    });
+    return sendErrorResponse(res, 410, 'Withdrawal XDR has expired. The creator must cancel and submit a new withdrawal request.');
+  }
+
+  // Validate transaction operations match requestRow before platform co-signing
+  try {
+    const StellarSdk = require('@stellar/stellar-sdk');
+    const { networkPassphrase } = require('../config/stellar');
+    const txToVerify = StellarSdk.TransactionBuilder.fromXDR(requestRow.unsigned_xdr, networkPassphrase);
+    if (!txToVerify.operations || txToVerify.operations.length !== 1 || txToVerify.operations[0].type !== 'payment') {
+      return sendErrorResponse(res, 422, 'Transaction must contain exactly one payment operation');
+    }
+    const op = txToVerify.operations[0];
+    if (op.destination !== requestRow.destination_key) {
+      return sendErrorResponse(res, 422, 'Transaction destination does not match approved withdrawal request');
+    }
+    if (parseFloat(op.amount) !== parseFloat(requestRow.amount)) {
+      return sendErrorResponse(res, 422, 'Transaction amount does not match approved withdrawal request');
+    }
+  } catch (err) {
+    return sendErrorResponse(res, 422, 'Malformed withdrawal transaction XDR');
   }
 
   const signedXdr = signTransactionXdr({
@@ -411,13 +492,91 @@ const platformApproveHandler = async (req, res) => {
 
   const signatureCount = signatureCountFromXdr(signedXdr);
   if (signatureCount < 2) {
-    return res.status(422).json({ error: 'Insufficient signatures: expected creator + platform' });
+    return sendErrorResponse(res, 422, 'Insufficient signatures: expected creator + platform');
   }
 
+  // Claim the withdrawal BEFORE any on-chain submission; only one concurrent approval can win.
+  const { rows: claimRows } = await db.query(
+    `UPDATE withdrawal_requests
+     SET platform_claimed_at = NOW()
+     WHERE id = $1 AND status = 'pending' AND platform_signed = FALSE AND platform_claimed_at IS NULL
+     RETURNING id`,
+    [req.params.id]
+  );
+  if (!claimRows.length) {
+    return sendErrorResponse(res, 409, 'Withdrawal request is already being processed; refresh and try again.');
+  }
+  const releaseClaim = () =>
+    db.query('UPDATE withdrawal_requests SET platform_claimed_at = NULL WHERE id = $1', [req.params.id])
+      .catch((e) => logger.error('Failed to release withdrawal claim', { withdrawal_id: req.params.id, error: e.message }));
+
+  // Idempotency: the tx hash is derived from the envelope body, so a retry after an ambiguous
+  // outcome (submitted but DB update lost) resolves to the same hash. Reconcile against Horizon
+  // instead of submitting again.
+  const expectedHash = getTransactionHash(signedXdr);
   let txHash;
+  let alreadyOnChain = false;
   try {
-    txHash = await submitSignedWithdrawal({ xdr: signedXdr });
-  } catch (err) {
+    alreadyOnChain = await transactionExistsOnHorizon(expectedHash);
+  } catch (lookupErr) {
+    logger.warn('Horizon pre-submit lookup failed; proceeding to submit', {
+      withdrawal_id: req.params.id,
+      error: lookupErr.message,
+    });
+  }
+
+  let submitError = null;
+  if (alreadyOnChain) {
+    txHash = expectedHash;
+    logger.warn('Withdrawal already on Stellar; reconciling records without resubmitting', {
+      withdrawal_id: req.params.id,
+      tx_hash: txHash,
+    });
+  } else {
+    try {
+      txHash = await submitSignedWithdrawal({ xdr: signedXdr });
+    } catch (err) {
+      if (err instanceof CircuitOpenError) {
+        logger.warn('Withdrawal submission blocked by Stellar circuit breaker', {
+          withdrawal_id: req.params.id,
+          error: err.message,
+        });
+        return sendErrorResponse(res, 503, CIRCUIT_OPEN_MESSAGE, undefined, undefined, { retryable: true });
+      }
+      submitError = err;
+    }
+  }
+
+  if (submitError) {
+    // The submit call may have failed after the network accepted the tx (timeout etc.).
+    let landed;
+    try {
+      landed = await transactionExistsOnHorizon(expectedHash);
+    } catch (lookupErr) {
+      if (lookupErr instanceof CircuitOpenError) {
+        logger.warn('Withdrawal reconciliation blocked by Stellar circuit breaker', {
+          withdrawal_id: req.params.id,
+          tx_hash: expectedHash,
+          error: lookupErr.message,
+        });
+        return sendErrorResponse(res, 503, CIRCUIT_OPEN_MESSAGE, undefined, undefined, { retryable: true });
+      }
+      logger.error('Withdrawal submission outcome unknown', {
+        withdrawal_id: req.params.id,
+        tx_hash: expectedHash,
+        error: lookupErr.message,
+      });
+      await releaseClaim();
+      return sendErrorResponse(res, 503, 'Withdrawal submission outcome is unknown. Retry approval shortly; it will reconcile with Stellar without double-submitting.');
+    }
+    if (landed) {
+      txHash = expectedHash;
+      submitError = null;
+    }
+  }
+
+  if (submitError) {
+    const err = submitError;
     logger.error('Withdrawal Stellar submission failed', {
       withdrawal_id: req.params.id,
       error: err.message,
@@ -439,6 +598,7 @@ const platformApproveHandler = async (req, res) => {
         action: 'submit_failed',
         note: err.message || 'Stellar submit failed',
         metadata: { detail: String(err) },
+        ...requestAuditContext(req),
       });
       await markWithdrawalFailed(client, {
         withdrawalRequestId: req.params.id,
@@ -451,9 +611,7 @@ const platformApproveHandler = async (req, res) => {
     } finally {
       client.release();
     }
-    return res.status(502).json({
-      error: 'Stellar network rejected the transaction after dual approval. Request marked failed; see audit log.',
-    });
+    return sendErrorResponse(res, 502, 'Stellar network rejected the transaction after dual approval. Request marked failed; see audit log.');
   }
 
   const client = await db.connect();
@@ -468,7 +626,7 @@ const platformApproveHandler = async (req, res) => {
     );
     if (!updated.length) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Withdrawal request changed; refresh and try again.' });
+      return sendErrorResponse(res, 409, 'Withdrawal request changed; refresh and try again.');
     }
     await logWithdrawalEvent(client, {
       withdrawalRequestId: req.params.id,
@@ -476,6 +634,7 @@ const platformApproveHandler = async (req, res) => {
       action: 'platform_signed',
       note: null,
       metadata: { tx_hash: txHash },
+      ...requestAuditContext(req),
     });
     await finalizeWithdrawalSubmitted(client, {
       withdrawalRequestId: req.params.id,
@@ -490,7 +649,7 @@ const platformApproveHandler = async (req, res) => {
       [requestRow.campaign_id]
     );
     if (cRows.length) {
-      sendEmail({
+      sendEmailSafe({
         to: cRows[0].email,
         subject: 'Withdrawal Approved',
         text: `Your withdrawal for ${requestRow.amount} has been approved by the platform. Transaction Hash: ${txHash}`
@@ -522,14 +681,15 @@ const platformApproveHandler = async (req, res) => {
       tx_hash: txHash,
       error: err.message,
     });
-    res.status(500).json({ error: 'Transaction submitted but failed to update records; check Stellar and audit trail.' });
+    await releaseClaim();
+    sendErrorResponse(res, 500, 'Transaction submitted but records could not be updated. Retry approval to reconcile; it will not resubmit.', undefined, undefined, { tx_hash: txHash });
   } finally {
     client.release();
   }
 };
 
 router.post('/:id/approve/platform', requireAuth, requirePlatformApprover, platformApproveHandler);
-// Alias for docs + issue acceptance criteria
+// Deprecated alias of POST /:id/approve/platform (see API.md).
 router.post('/:id/approve', requireAuth, requirePlatformApprover, platformApproveHandler);
 
 router.post('/:id/cancel', requireAuth, async (req, res) => {
@@ -542,20 +702,18 @@ router.post('/:id/cancel', requireAuth, async (req, res) => {
      WHERE wr.id = $1`,
     [req.params.id]
   );
-  if (!requests.length) return res.status(404).json({ error: 'Withdrawal request not found' });
+  if (!requests.length) return sendErrorResponse(res, 404, 'Withdrawal request not found');
   const requestRow = requests[0];
 
   const isOwner = await checkOwnerAccess(req, requestRow.campaign_id);
   if (!isOwner) {
-    return res.status(403).json({ error: 'Only campaign owners can cancel this request' });
+    return sendErrorResponse(res, 403, 'Only campaign owners can cancel this request');
   }
   if (requestRow.status !== 'pending') {
-    return res.status(409).json({ error: 'Only pending requests can be cancelled' });
+    return sendErrorResponse(res, 409, 'Only pending requests can be cancelled');
   }
   if (requestRow.creator_signed) {
-    return res.status(409).json({
-      error: 'Creator signature is already attached. Use platform reject flow instead of cancel.',
-    });
+    return sendErrorResponse(res, 409, 'Creator signature is already attached. Use platform reject flow instead of cancel.');
   }
 
   const client = await db.connect();
@@ -570,7 +728,7 @@ router.post('/:id/cancel', requireAuth, async (req, res) => {
     );
     if (!updated.length) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Withdrawal request changed; refresh and try again.' });
+      return sendErrorResponse(res, 409, 'Withdrawal request changed; refresh and try again.');
     }
     await logWithdrawalEvent(client, {
       withdrawalRequestId: req.params.id,
@@ -578,13 +736,14 @@ router.post('/:id/cancel', requireAuth, async (req, res) => {
       action: 'creator_cancelled',
       note: reason,
       metadata: {},
+      ...requestAuditContext(req),
     });
     await client.query('COMMIT');
     res.json(updated[0]);
   } catch (err) {
     await client.query('ROLLBACK');
     logger.error('Withdrawal cancellation failed', { withdrawal_id: req.params.id, error: err.message });
-    res.status(500).json({ error: 'Could not cancel withdrawal request' });
+    sendErrorResponse(res, 500, 'Could not cancel withdrawal request');
   } finally {
     client.release();
   }
@@ -626,17 +785,17 @@ router.post('/:id/reject', requireAuth, requirePlatformApprover, async (req, res
     'SELECT * FROM withdrawal_requests WHERE id = $1',
     [req.params.id]
   );
-  if (!requests.length) return res.status(404).json({ error: 'Withdrawal request not found' });
+  if (!requests.length) return sendErrorResponse(res, 404, 'Withdrawal request not found');
   const requestRow = requests[0];
 
   if (requestRow.status !== 'pending') {
-    return res.status(409).json({ error: 'Only pending requests can be rejected' });
+    return sendErrorResponse(res, 409, 'Only pending requests can be rejected');
   }
   if (!requestRow.creator_signed) {
-    return res.status(409).json({ error: 'Creator must sign before platform can reject this release' });
+    return sendErrorResponse(res, 409, 'Creator must sign before platform can reject this release');
   }
   if (requestRow.platform_signed) {
-    return res.status(409).json({ error: 'Platform has already signed; cannot reject' });
+    return sendErrorResponse(res, 409, 'Platform has already signed; cannot reject');
   }
 
   const client = await db.connect();
@@ -646,12 +805,13 @@ router.post('/:id/reject', requireAuth, requirePlatformApprover, async (req, res
       `UPDATE withdrawal_requests
        SET status = 'denied', denial_reason = $1
        WHERE id = $2 AND status = 'pending' AND creator_signed = TRUE AND platform_signed = FALSE
+         AND platform_claimed_at IS NULL
        RETURNING *`,
       [reason, req.params.id]
     );
     if (!updated.length) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Withdrawal request changed; refresh and try again.' });
+      return sendErrorResponse(res, 409, 'Withdrawal request changed; refresh and try again.');
     }
     await logWithdrawalEvent(client, {
       withdrawalRequestId: req.params.id,
@@ -659,6 +819,7 @@ router.post('/:id/reject', requireAuth, requirePlatformApprover, async (req, res
       action: 'platform_rejected',
       note: reason,
       metadata: {},
+      ...requestAuditContext(req),
     });
     await client.query('COMMIT');
 
@@ -667,7 +828,7 @@ router.post('/:id/reject', requireAuth, requirePlatformApprover, async (req, res
       [requestRow.campaign_id]
     );
     if (cRows.length) {
-      sendEmail({
+      sendEmailSafe({
         to: cRows[0].email,
         subject: 'Withdrawal Rejected',
         text: `Your withdrawal request has been rejected by the platform. Reason: ${reason}`
@@ -684,7 +845,7 @@ router.post('/:id/reject', requireAuth, requirePlatformApprover, async (req, res
   } catch (err) {
     await client.query('ROLLBACK');
     logger.error('Withdrawal rejection failed', { withdrawal_id: req.params.id, error: err.message });
-    res.status(500).json({ error: 'Could not reject withdrawal request' });
+    sendErrorResponse(res, 500, 'Could not reject withdrawal request');
   } finally {
     client.release();
   }
@@ -692,7 +853,7 @@ router.post('/:id/reject', requireAuth, requirePlatformApprover, async (req, res
 
 router.get('/campaign/:campaignId', requireAuth, async (req, res) => {
   const access = await assertWithdrawalAccess(req, req.params.campaignId);
-  if (access.error) return res.status(access.status).json({ error: access.error });
+  if (access.error) return sendErrorResponse(res, access.status, access.error);
 
   const { rows } = await db.query(
     `SELECT id, campaign_id, requested_by, amount, destination_key, creator_signed,
@@ -708,10 +869,10 @@ router.get('/campaign/:campaignId', requireAuth, async (req, res) => {
 // Get a single withdrawal request (including unsigned_xdr) for authorized users
 router.get('/:id', requireAuth, async (req, res) => {
   const { rows } = await db.query('SELECT * FROM withdrawal_requests WHERE id = $1', [req.params.id]);
-  if (!rows.length) return res.status(404).json({ error: 'Withdrawal request not found' });
+  if (!rows.length) return sendErrorResponse(res, 404, 'Withdrawal request not found');
   const row = rows[0];
   const access = await assertWithdrawalAccess(req, row.campaign_id);
-  if (access.error) return res.status(access.status).json({ error: access.error });
+  if (access.error) return sendErrorResponse(res, access.status, access.error);
 
   // Only return unsigned_xdr to owners/admins
   res.json(row);
@@ -745,13 +906,14 @@ const withdrawalAuditHandler = async (req, res) => {
     `SELECT wr.campaign_id FROM withdrawal_requests wr WHERE wr.id = $1`,
     [req.params.id]
   );
-  if (!wr.length) return res.status(404).json({ error: 'Withdrawal request not found' });
+  if (!wr.length) return sendErrorResponse(res, 404, 'Withdrawal request not found');
 
   const access = await assertWithdrawalAccess(req, wr[0].campaign_id);
-  if (access.error) return res.status(access.status).json({ error: access.error });
+  if (access.error) return sendErrorResponse(res, access.status, access.error);
 
   const { rows } = await db.query(
-    `SELECT e.id, e.withdrawal_request_id, e.actor_user_id, e.action, e.note, e.metadata, e.created_at
+    `SELECT e.id, e.withdrawal_request_id, e.actor_user_id, e.action, e.note, e.metadata,
+            e.actor_ip, e.user_agent, e.request_id, e.created_at
      FROM withdrawal_approval_events e
      WHERE e.withdrawal_request_id = $1
      ORDER BY e.created_at ASC`,
@@ -761,7 +923,7 @@ const withdrawalAuditHandler = async (req, res) => {
 };
 
 router.get('/:id/events', requireAuth, withdrawalAuditHandler);
-// Alias for docs + issue acceptance criteria
+// Deprecated alias of GET /:id/events (see API.md).
 router.get('/:id/audit', requireAuth, withdrawalAuditHandler);
 
 module.exports = router;

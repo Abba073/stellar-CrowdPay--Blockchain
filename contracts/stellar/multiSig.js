@@ -65,8 +65,29 @@ function signTransaction(xdr, signerSecret) {
 }
 
 async function submitTransaction(xdr) {
-  // Add platform signature before submitting
+  if (!process.env.PLATFORM_SECRET_KEY) {
+    throw new Error('PLATFORM_SECRET_KEY is not set');
+  }
+
+  // Decode and assert transaction validity before co-signing
   const tx = new Transaction(xdr, networkPassphrase);
+
+  if (!tx.operations || tx.operations.length !== 1 || tx.operations[0].type !== 'payment') {
+    throw new Error('Transaction must contain exactly one payment operation');
+  }
+
+  const op = tx.operations[0];
+  if (!op.destination || !op.amount || parseFloat(op.amount) <= 0) {
+    throw new Error('Transaction operation has invalid destination or amount');
+  }
+
+  if (tx.timeBounds) {
+    const now = Math.floor(Date.now() / 1000);
+    if (tx.timeBounds.maxTime && parseInt(tx.timeBounds.maxTime, 10) < now) {
+      throw new Error('Transaction timeBounds have expired');
+    }
+  }
+
   const platformKeypair = Keypair.fromSecret(process.env.PLATFORM_SECRET_KEY);
   tx.sign(platformKeypair);
 

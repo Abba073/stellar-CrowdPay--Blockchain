@@ -3,6 +3,12 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import Navbar from './Navbar';
+import CampaignQRCode from './CampaignQRCode';
+
+vi.mock('../services/api', () => ({
+  api: { getNotifications: vi.fn(() => Promise.resolve([])) },
+}));
+vi.mock('qrcode', () => ({ default: { toCanvas: vi.fn() } }));
 
 const mockNavigate = vi.fn();
 const mockLogout = vi.fn();
@@ -64,5 +70,29 @@ describe('Navbar', () => {
     await user.click(screen.getByRole('button', { name: /logout/i }));
     expect(mockLogout).toHaveBeenCalled();
     expect(mockNavigate).toHaveBeenCalledWith('/');
+  });
+
+  it('notification dropdown is a keyboard-operable menu that closes on Escape', async () => {
+    useAuth.mockReturnValue({ user: { name: 'Alice', role: 'contributor' }, logout: mockLogout });
+    const user = userEvent.setup();
+    renderNavbar();
+    const bell = screen.getByRole('button', { name: /unread notifications/i });
+    expect(bell).toHaveAttribute('aria-haspopup', 'menu');
+    expect(bell).toHaveAttribute('aria-expanded', 'false');
+    await user.click(bell);
+    expect(bell).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('menu', { name: /notifications/i })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: /mark all as read/i })).toHaveFocus();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(bell).toHaveFocus();
+  });
+
+  it('QR code widget exposes labeled, focusable controls', () => {
+    render(<CampaignQRCode url="https://example.com/campaigns/1" size={100} />);
+    expect(screen.getByRole('img', { name: /qr code for/i })).toBeInTheDocument();
+    const download = screen.getByRole('link', { name: /download qr code image/i });
+    download.focus();
+    expect(download).toHaveFocus();
   });
 });

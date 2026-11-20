@@ -1,6 +1,6 @@
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
   id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   email                   TEXT UNIQUE NOT NULL,
   password_hash           TEXT NOT NULL,
@@ -10,7 +10,7 @@ CREATE TABLE users (
   created_at              TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE campaigns (
+CREATE TABLE IF NOT EXISTS campaigns (
   id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   creator_id          UUID NOT NULL REFERENCES users(id),
   title               TEXT NOT NULL,
@@ -25,7 +25,7 @@ CREATE TABLE campaigns (
   created_at          TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE contributions (
+CREATE TABLE IF NOT EXISTS contributions (
   id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   campaign_id         UUID NOT NULL REFERENCES campaigns(id),
   sender_public_key   TEXT NOT NULL,
@@ -42,7 +42,7 @@ CREATE TABLE contributions (
 );
 
 -- Indexes
-CREATE INDEX ON contributions (campaign_id);
-CREATE INDEX ON contributions (tx_hash);
-CREATE INDEX ON campaigns (status);
-CREATE INDEX ON campaigns (creator_id);
+CREATE INDEX IF NOT EXISTS contributions_campaign_id_idx ON contributions (campaign_id);
+CREATE INDEX IF NOT EXISTS contributions_tx_hash_idx ON contributions (tx_hash);
+CREATE INDEX IF NOT EXISTS campaigns_status_idx ON campaigns (status);
+CREATE INDEX IF NOT EXISTS campaigns_creator_id_idx ON campaigns (creator_id);
