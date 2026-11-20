@@ -834,14 +834,14 @@ export default function Campaign() {
             </button>
           </div>
         )}
-      {campaign.creator_kyc_status !== "verified" && (
+      {isOwner && campaign.creator_kyc_status !== "verified" && (
         <div
           className="alert alert--warning"
           style={{ marginBottom: "1.25rem" }}
           role="status"
         >
-          <strong>Legacy campaign:</strong> this campaign was created before
-          creator identity verification was required.
+          Your identity is not yet verified. Complete KYC to build contributor
+          trust and unlock platform features.
         </div>
       )}
       {editSuccess && (
