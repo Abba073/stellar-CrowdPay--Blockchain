@@ -1,6 +1,20 @@
 const { body, query, validationResult } = require('express-validator');
 const { Keypair } = require('@stellar/stellar-sdk');
 const { getSupportedAssetCodes } = require('../services/stellarService');
+const { sendErrorResponse } = require('./errorHandler');
+const { tryParseAmountToStroops } = require('../utils/amounts');
+
+/**
+ * express-validator check for a Stellar amount: a plain decimal (no
+ * exponent, at most 7 decimal places) greater than zero. Uses the same rules
+ * as parseAmountToStroops, so anything that passes validation also parses;
+ * isFloat() accepted "1e5" or 8-decimal values that later threw (500).
+ */
+function isPositiveStellarAmount(value) {
+  const stroops = tryParseAmountToStroops(value);
+  return stroops !== null && stroops > 0n;
+}
+const AMOUNT_FORMAT_HINT = 'a positive decimal number with at most 7 decimal places';
 
 const SUPPORTED_ASSETS = getSupportedAssetCodes();
 const VALID_CAMPAIGN_STATUSES = [
@@ -113,8 +127,8 @@ const createCampaignValidation = [
   body('target_amount')
     .exists()
     .withMessage('Target amount is required')
-    .isFloat({ gt: 0 })
-    .withMessage('Target amount must be greater than zero'),
+    .custom(isPositiveStellarAmount)
+    .withMessage(`Target amount must be ${AMOUNT_FORMAT_HINT}`),
   body('asset_type')
     .notEmpty()
     .withMessage('Asset type is required')
@@ -134,12 +148,12 @@ const createCampaignValidation = [
     }),
   body('min_contribution')
     .optional({ nullable: true, checkFalsy: true })
-    .isFloat({ gt: 0 })
-    .withMessage('Minimum contribution must be greater than zero'),
+    .custom(isPositiveStellarAmount)
+    .withMessage(`Minimum contribution must be ${AMOUNT_FORMAT_HINT}`),
   body('max_contribution')
     .optional({ nullable: true, checkFalsy: true })
-    .isFloat({ gt: 0 })
-    .withMessage('Maximum contribution must be greater than zero')
+    .custom(isPositiveStellarAmount)
+    .withMessage(`Maximum contribution must be ${AMOUNT_FORMAT_HINT}`)
     .custom((value, { req }) => {
       if (value && req.body.min_contribution && parseFloat(value) <= parseFloat(req.body.min_contribution)) {
         throw new Error('Maximum contribution must be greater than minimum contribution');
@@ -151,8 +165,8 @@ const createCampaignValidation = [
     }),
   body('max_per_user')
     .optional({ nullable: true, checkFalsy: true })
-    .isFloat({ gt: 0 })
-    .withMessage('Per-contributor cap must be greater than zero')
+    .custom(isPositiveStellarAmount)
+    .withMessage(`Per-contributor cap must be ${AMOUNT_FORMAT_HINT}`)
     .custom((value, { req }) => {
       if (value && req.body.min_contribution && parseFloat(value) <= parseFloat(req.body.min_contribution)) {
         throw new Error('Per-contributor cap must be greater than minimum contribution');
@@ -216,8 +230,8 @@ const contributionQuoteValidation = [
   query('dest_amount')
     .notEmpty()
     .withMessage('dest_amount is required')
-    .isFloat({ gt: 0 })
-    .withMessage('dest_amount must be greater than zero'),
+    .custom(isPositiveStellarAmount)
+    .withMessage(`dest_amount must be ${AMOUNT_FORMAT_HINT}`),
 ];
 
 const contributionValidation = [
@@ -231,8 +245,8 @@ const contributionValidation = [
   body('amount')
     .exists()
     .withMessage('amount is required')
-    .isFloat({ gt: 0 })
-    .withMessage('amount must be greater than zero'),
+    .custom(isPositiveStellarAmount)
+    .withMessage(`amount must be ${AMOUNT_FORMAT_HINT}`),
   body('send_asset')
     .notEmpty()
     .withMessage('send_asset is required')
@@ -263,8 +277,8 @@ const withdrawalValidation = [
   body('amount')
     .exists()
     .withMessage('amount is required')
-    .isFloat({ gt: 0 })
-    .withMessage('amount must be greater than zero'),
+    .custom(isPositiveStellarAmount)
+    .withMessage(`amount must be ${AMOUNT_FORMAT_HINT}`),
   body('destination_key')
     .notEmpty()
     .withMessage('destination_key is required')
@@ -308,18 +322,31 @@ const getCampaignsValidation = [
     .withMessage('offset must be a non-negative integer'),
 ];
 
+/** { field: message } for the first error on each field. */
+function fieldErrors(errors) {
+  const fields = {};
+  for (const e of errors) {
+    const name = e.path || e.param;
+    if (name && !(name in fields)) fields[name] = e.msg;
+  }
+  return fields;
+}
+
 function validateRequest(req, res, next) {
   const result = validationResult(req);
   if (result.isEmpty()) return next();
 
-  return res.status(400).json({ errors: result.array() });
+  const errors = result.array();
+  // `errors` (the raw express-validator list) is kept for existing clients.
+  return sendErrorResponse(res, 400, errors[0].msg, fieldErrors(errors), 'VALIDATION_ERROR', { errors });
 }
 
 function validateRequestAsError(req, res, next) {
   const result = validationResult(req);
   if (result.isEmpty()) return next();
 
-  return res.status(400).json({ error: result.array()[0].msg });
+  const errors = result.array();
+  return sendErrorResponse(res, 400, errors[0].msg, fieldErrors(errors), 'VALIDATION_ERROR');
 }
 
 module.exports = {

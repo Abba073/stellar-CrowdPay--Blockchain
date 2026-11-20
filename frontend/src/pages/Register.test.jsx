@@ -40,7 +40,11 @@ describe('Register', () => {
   });
 
   it('gives every form control a programmatic label', () => {
-    const { container } = render(<MemoryRouter><Register /></MemoryRouter>);
+    const { container } = render(
+      <MemoryRouter>
+        <Register />
+      </MemoryRouter>
+    );
     expect(findUnlabeledControls(container)).toEqual([]);
   });
 

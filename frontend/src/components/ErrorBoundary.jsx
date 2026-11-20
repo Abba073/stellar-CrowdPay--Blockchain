@@ -23,11 +23,7 @@ export default class ErrorBoundary extends React.Component {
             <p style={styles.sub}>
               An unexpected error occurred. Your data is safe — try reloading the page.
             </p>
-            <button
-              type="button"
-              className="btn-primary"
-              onClick={() => window.location.reload()}
-            >
+            <button type="button" className="btn-primary" onClick={() => window.location.reload()}>
               Reload page
             </button>
           </div>
@@ -48,6 +44,16 @@ const styles = {
     padding: '2rem 1.25rem',
   },
   box: { maxWidth: '420px', textAlign: 'center' },
-  heading: { fontSize: '1.4rem', fontWeight: 700, color: 'var(--color-text-primary)', marginBottom: '0.75rem' },
-  sub: { color: 'var(--color-text-hint)', fontSize: '0.95rem', lineHeight: 1.55, marginBottom: '1.5rem' },
+  heading: {
+    fontSize: '1.4rem',
+    fontWeight: 700,
+    color: 'var(--color-text-primary)',
+    marginBottom: '0.75rem',
+  },
+  sub: {
+    color: 'var(--color-text-hint)',
+    fontSize: '0.95rem',
+    lineHeight: 1.55,
+    marginBottom: '1.5rem',
+  },
 };

@@ -80,7 +80,7 @@ test('PATCH /promote: non-super-admin admin gets 403', async () => {
     .set('Authorization', 'Bearer token');
 
   assert.equal(res.status, 403);
-  assert.match(res.body.error, /super-admin/i);
+  assert.match(res.body.error.message, /super-admin/i);
 });
 
 test('PATCH /promote: super-admin can promote a regular user', async () => {
@@ -126,7 +126,7 @@ test('PATCH /promote: returns 400 if user is already an admin', async () => {
     .set('Authorization', 'Bearer token');
 
   assert.equal(res.status, 400);
-  assert.match(res.body.error, /already an admin/i);
+  assert.match(res.body.error.message, /already an admin/i);
 });
 
 // ---------------------------------------------------------------------------
@@ -145,7 +145,7 @@ test('PATCH /demote: non-super-admin gets 403', async () => {
     .set('Authorization', 'Bearer token');
 
   assert.equal(res.status, 403);
-  assert.match(res.body.error, /super-admin/i);
+  assert.match(res.body.error.message, /super-admin/i);
 });
 
 test('PATCH /demote: self-demotion is blocked (403)', async () => {
@@ -162,7 +162,7 @@ test('PATCH /demote: self-demotion is blocked (403)', async () => {
     .set('Authorization', 'Bearer token');
 
   assert.equal(res.status, 403);
-  assert.match(res.body.error, /cannot demote yourself/i);
+  assert.match(res.body.error.message, /cannot demote yourself/i);
 });
 
 test('PATCH /demote: blocks demoting the last admin (409)', async () => {
@@ -187,7 +187,7 @@ test('PATCH /demote: blocks demoting the last admin (409)', async () => {
     .set('Authorization', 'Bearer token');
 
   assert.equal(res.status, 409);
-  assert.match(res.body.error, /last admin/i);
+  assert.match(res.body.error.message, /last admin/i);
 });
 
 test('PATCH /demote: super-admin can demote another admin when quorum is maintained', async () => {
@@ -254,5 +254,5 @@ test('PATCH /demote: returns 400 when target is not an admin', async () => {
     .set('Authorization', 'Bearer token');
 
   assert.equal(res.status, 400);
-  assert.match(res.body.error, /not an admin/i);
+  assert.match(res.body.error.message, /not an admin/i);
 });

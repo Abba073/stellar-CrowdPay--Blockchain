@@ -110,7 +110,9 @@ describe('ContributeModal form', () => {
     renderModal({ min_contribution: '5' });
     await user.type(amountInput(), '4');
     await user.click(screen.getByRole('button', { name: /confirm payment/i }));
-    expect(await screen.findByText(/Minimum contribution is 5 USDC/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Contribution amount is below the minimum limit of 5 USDC/i)
+    ).toBeInTheDocument();
     expect(api.contribute).not.toHaveBeenCalled();
   });
 
@@ -119,21 +121,21 @@ describe('ContributeModal form', () => {
     renderModal({ max_contribution: '100' });
     await user.type(amountInput(), '101');
     await user.click(screen.getByRole('button', { name: /confirm payment/i }));
-    expect(await screen.findByText(/Maximum contribution is 100 USDC/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Contribution violates the maximum limit of 100 USDC/i)
+    ).toBeInTheDocument();
     expect(api.contribute).not.toHaveBeenCalled();
   });
 
   it('validates cumulative per-contributor cap', async () => {
-    api.getContributions.mockResolvedValue({
-      contributions: [{ sender_public_key: 'GUSER', amount: '30' }],
-    });
     const user = userEvent.setup();
-    renderModal({ max_per_user: '50' });
-    await waitFor(() => expect(api.getContributions).toHaveBeenCalled());
+    renderModal({ max_per_user: '50', user_contributed_amount: 30 });
     await user.type(amountInput(), '25');
     await user.click(screen.getByRole('button', { name: /confirm payment/i }));
     expect(
-      await screen.findByText(/You have already contributed 30 USDC. The per-contributor limit is 50./i)
+      await screen.findByText(
+        /You have already contributed 30 USDC. The per-contributor limit is 50./i
+      )
     ).toBeInTheDocument();
     expect(api.contribute).not.toHaveBeenCalled();
   });
@@ -210,10 +212,9 @@ describe('ContributeModal custodial payment and finalization', () => {
   it('shows the confirming state with an explorer link until the ledger finalizes', async () => {
     vi.useFakeTimers();
     await submitCustodial();
-    expect(screen.getByRole('link', { name: /view transaction on stellar expert/i })).toHaveAttribute(
-      'href',
-      expect.stringContaining('/tx/abc123')
-    );
+    expect(
+      screen.getByRole('link', { name: /view transaction on stellar expert/i })
+    ).toHaveAttribute('href', expect.stringContaining('/tx/abc123'));
     await advancePoll(2);
     expect(api.getContributionFinalization).toHaveBeenCalledWith('abc123');
     expect(screen.getByText(/confirming on stellar/i)).toBeInTheDocument();
@@ -239,7 +240,8 @@ describe('ContributeModal custodial payment and finalization', () => {
     await submitCustodial();
     await advancePoll(1);
     expect(screen.getByRole('alert')).toHaveTextContent(/transaction failed on stellar/i);
-    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('heading', { name: /payment failed/i })).toBeInTheDocument();
+    expect(onSuccess).not.toHaveBeenCalled();
   });
 
   it('keeps polling through finalization errors and stops after the attempt budget', async () => {
@@ -250,9 +252,9 @@ describe('ContributeModal custodial payment and finalization', () => {
     await submitCustodial();
     await advancePoll(15);
     expect(api.getContributionFinalization).toHaveBeenCalledTimes(15);
-    expect(screen.getByRole('heading', { name: /payment submitted/i })).toBeInTheDocument();
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('heading', { name: /confirmation pending/i })).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent(/could not confirm whether this transaction reached the stellar ledger/i);
+    expect(onSuccess).not.toHaveBeenCalled();
 
     await advancePoll(3);
     expect(api.getContributionFinalization).toHaveBeenCalledTimes(15);
@@ -262,19 +264,22 @@ describe('ContributeModal custodial payment and finalization', () => {
     [404, 'Campaign not found or no longer active.'],
     [422, 'Path payment failed'],
     [500, 'Server exploded'],
-  ])('shows a friendly error and stays on the form when submit fails with %s', async (status, text) => {
-    api.contribute.mockRejectedValue(
-      Object.assign(new Error(status === 404 ? 'x' : text), { status })
-    );
-    const user = userEvent.setup();
-    renderModal();
-    await user.type(amountInput(), '15');
-    await user.click(screen.getByRole('button', { name: /confirm payment/i }));
-    expect(await screen.findByRole('alert')).toHaveTextContent(text);
-    expect(screen.getByText(/support this campaign/i)).toBeInTheDocument();
-    expect(api.getContributionFinalization).not.toHaveBeenCalled();
-    expect(onSuccess).not.toHaveBeenCalled();
-  });
+  ])(
+    'shows a friendly error and stays on the form when submit fails with %s',
+    async (status, text) => {
+      api.contribute.mockRejectedValue(
+        Object.assign(new Error(status === 404 ? 'x' : text), { status })
+      );
+      const user = userEvent.setup();
+      renderModal();
+      await user.type(amountInput(), '15');
+      await user.click(screen.getByRole('button', { name: /confirm payment/i }));
+      expect(await screen.findByRole('alert')).toHaveTextContent(text);
+      expect(screen.getByText(/support this campaign/i)).toBeInTheDocument();
+      expect(api.getContributionFinalization).not.toHaveBeenCalled();
+      expect(onSuccess).not.toHaveBeenCalled();
+    }
+  );
 });
 
 describe('ContributeModal Freighter payment', () => {
@@ -374,7 +379,10 @@ describe('ContributeModal anchor deposit', () => {
   }
 
   it('starts the SEP-24 session and does not also submit a custodial contribution', async () => {
-    api.getAnchorDepositStatus.mockResolvedValue({ id: 'session-1', status: 'pending_user_transfer_start' });
+    api.getAnchorDepositStatus.mockResolvedValue({
+      id: 'session-1',
+      status: 'pending_user_transfer_start',
+    });
     await startAnchorFlow();
     expect(await screen.findByText(/complete your deposit/i)).toBeInTheDocument();
     expect(api.startAnchorDeposit).toHaveBeenCalledWith({

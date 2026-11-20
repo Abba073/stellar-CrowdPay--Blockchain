@@ -397,6 +397,81 @@ test('POST /api/auth/login returns 401 for wrong password', async () => {
   assert.equal(res.status, 401);
 });
 
+function lockoutStub({ allowed = true, lockOnFailure = false } = {}) {
+  const calls = [];
+  return {
+    calls,
+    module: {
+      checkLoginAllowed: async (db, email) => {
+        calls.push(['check', email]);
+        return allowed ? { allowed: true } : { allowed: false, reason: 'locked', retryAfterSeconds: 900 };
+      },
+      recordLoginFailure: async (db, email) => {
+        calls.push(['failure', email]);
+        return lockOnFailure
+          ? { locked: true, failedCount: 5, lockedUntil: new Date(Date.now() + 900_000) }
+          : { locked: false, failedCount: 1 };
+      },
+      recordLoginSuccess: async (db, email) => {
+        calls.push(['success', email]);
+      },
+    },
+  };
+}
+
+test('POST /api/auth/login rejects a locked account with 429 even with the correct password', async () => {
+  const passwordHash = await bcrypt.hash('correct-pass', 10);
+  const lockout = lockoutStub({ allowed: false });
+  const { app } = buildHttpApp({
+    users: [{ id: 'uid-1', email: 'user@example.com', password_hash: passwordHash, role: 'contributor' }],
+    extra: { '../services/loginLockout': lockout.module },
+  });
+
+  const res = await request(app)
+    .post('/api/auth/login')
+    .send({ email: 'User@Example.com', password: 'correct-pass' });
+
+  assert.equal(res.status, 429);
+  assert.equal(res.body.error.code, 'ACCOUNT_LOCKED');
+  assert.equal(res.body.retry_after_seconds, 900);
+  assert.equal(res.headers['retry-after'], '900');
+  assert.ok(!res.body.token);
+  assert.deepEqual(lockout.calls, [['check', 'user@example.com']]);
+});
+
+test('POST /api/auth/login records failures and answers 429 when the failure triggers a lock', async () => {
+  const passwordHash = await bcrypt.hash('correct-pass', 10);
+  const lockout = lockoutStub({ lockOnFailure: true });
+  const { app } = buildHttpApp({
+    users: [{ id: 'uid-1', email: 'user@example.com', password_hash: passwordHash, role: 'contributor' }],
+    extra: { '../services/loginLockout': lockout.module },
+  });
+
+  const res = await request(app)
+    .post('/api/auth/login')
+    .send({ email: 'user@example.com', password: 'wrong-pass' });
+
+  assert.equal(res.status, 429);
+  assert.equal(res.body.error.code, 'ACCOUNT_LOCKED');
+  assert.deepEqual(lockout.calls.map((c) => c[0]), ['check', 'failure']);
+});
+
+test('POST /api/auth/login clears the failure state on success', async () => {
+  const passwordHash = await bcrypt.hash('correct-pass', 10);
+  const lockout = lockoutStub();
+  const { app } = buildHttpApp({
+    users: [{ id: 'uid-1', email: 'user@example.com', password_hash: passwordHash, role: 'contributor' }],
+    extra: { '../services/loginLockout': lockout.module },
+  });
+
+  const res = await request(app)
+    .post('/api/auth/login')
+    .send({ email: 'user@example.com', password: 'correct-pass' });
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(lockout.calls.map((c) => c[0]), ['check', 'success']);
+});
+
 test('POST /api/auth/login returns 401 for unknown email', async () => {
   const { app } = buildHttpApp({ users: [] });
 

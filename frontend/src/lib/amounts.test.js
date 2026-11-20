@@ -15,7 +15,7 @@ describe('amounts (frontend fee mirror)', () => {
     expect(netAmount).toBe('0.7125');
     // fee + net === contributed amount, with no float drift.
     expect(parseAmountToStroops(feeAmount) + parseAmountToStroops(netAmount)).toBe(
-      parseAmountToStroops('0.75'),
+      parseAmountToStroops('0.75')
     );
   });
 

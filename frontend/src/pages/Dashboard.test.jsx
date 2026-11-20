@@ -14,7 +14,14 @@ const api = {
 
 const updateUser = vi.fn();
 const authState = {
-  user: { id: '1', name: 'Ada', email: 'ada@example.com', role: 'creator', wallet_public_key: 'GKEY', kyc_status: 'unverified' },
+  user: {
+    id: '1',
+    name: 'Ada',
+    email: 'ada@example.com',
+    role: 'creator',
+    wallet_public_key: 'GKEY',
+    kyc_status: 'unverified',
+  },
   token: 'jwt-token',
   ready: true,
   updateUser,
@@ -23,23 +30,70 @@ const authState = {
 vi.mock('../services/api', () => ({ api }));
 vi.mock('../context/AuthContext', () => ({ useAuth: () => authState }));
 vi.mock('../components/KycPrompt', () => ({ default: () => <div data-testid="kyc-prompt" /> }));
-vi.mock('../components/VerificationBadge', () => ({ default: ({ status }) => <span data-testid="verification-badge">{status}</span> }));
-vi.mock('../components/CampaignStatusBadge', () => ({ default: ({ status }) => <span data-testid="campaign-status">{status}</span> }));
-vi.mock('../components/DepositModal', () => ({ default: ({ onClose, onSuccess }) => (
-  <div data-testid="deposit-modal">
-    <button onClick={onClose}>close</button>
-    <button onClick={onSuccess}>deposited</button>
-  </div>
-) }));
+vi.mock('../components/VerificationBadge', () => ({
+  default: ({ status }) => <span data-testid="verification-badge">{status}</span>,
+}));
+vi.mock('../components/CampaignStatusBadge', () => ({
+  default: ({ status }) => <span data-testid="campaign-status">{status}</span>,
+}));
+vi.mock('../components/DepositModal', () => ({
+  default: ({ onClose, onSuccess }) => (
+    <div data-testid="deposit-modal">
+      <button onClick={onClose}>close</button>
+      <button onClick={onSuccess}>deposited</button>
+    </div>
+  ),
+}));
 
-const ME = { id: '1', name: 'Ada', email: 'ada@example.com', role: 'creator', kyc_status: 'unverified' };
-const STATS = { total_campaigns: 3, total_raised: '9000', active_campaigns: 2, funded_campaigns: 1 };
+const ME = {
+  id: '1',
+  name: 'Ada',
+  email: 'ada@example.com',
+  role: 'creator',
+  kyc_status: 'unverified',
+};
+const STATS = {
+  total_campaigns: 3,
+  total_raised: '9000',
+  active_campaigns: 2,
+  funded_campaigns: 1,
+};
 const CAMPAIGNS = [
-  { id: 10, title: 'Garden', raised_amount: '1000', target_amount: '2000', asset_type: 'USDC', status: 'active', contributor_count: 5, has_milestones: false, deadline: '2024-12-31' },
-  { id: 11, title: 'Kernel', raised_amount: '8000', target_amount: '8000', asset_type: 'XLM', status: 'funded', contributor_count: 20, has_milestones: true, deadline: null },
+  {
+    id: 10,
+    title: 'Garden',
+    raised_amount: '1000',
+    target_amount: '2000',
+    asset_type: 'USDC',
+    status: 'active',
+    contributor_count: 5,
+    has_milestones: false,
+    deadline: '2024-12-31',
+  },
+  {
+    id: 11,
+    title: 'Kernel',
+    raised_amount: '8000',
+    target_amount: '8000',
+    asset_type: 'XLM',
+    status: 'funded',
+    contributor_count: 20,
+    has_milestones: true,
+    deadline: null,
+  },
 ];
 const CONTRIBUTIONS = [
-  { id: 'c1', campaign_id: 10, campaign_title: 'Garden', campaign_status: 'active', amount: '50', asset: 'USDC', created_at: '2024-06-01T00:00:00Z', tx_hash: 'txhash123', conversion_rate: '1' },
+  {
+    id: 'c1',
+    campaign_id: 10,
+    campaign_title: 'Garden',
+    campaign_status: 'active',
+    amount: '50',
+    asset: 'USDC',
+    created_at: '2024-06-01T00:00:00Z',
+    tx_hash: 'txhash123',
+    conversion_rate: '1',
+  },
 ];
 
 function mockCreatorData() {
@@ -59,8 +113,12 @@ describe('Dashboard', () => {
     api.getMyCampaigns.mockReset().mockResolvedValue([]);
     updateUser.mockReset();
     authState.user = {
-      id: '1', name: 'Ada', email: 'ada@example.com', role: 'creator',
-      wallet_public_key: 'GKEY', kyc_status: 'unverified',
+      id: '1',
+      name: 'Ada',
+      email: 'ada@example.com',
+      role: 'creator',
+      wallet_public_key: 'GKEY',
+      kyc_status: 'unverified',
     };
     authState.token = 'jwt-token';
     authState.ready = true;
@@ -138,14 +196,19 @@ describe('Dashboard', () => {
 
   it('offers withdrawal for funded campaigns without milestones', async () => {
     mockCreatorData();
-    api.getMyCampaigns.mockResolvedValue([{ ...CAMPAIGNS[1], id: 12, has_milestones: false, title: 'Plain' }]);
+    api.getMyCampaigns.mockResolvedValue([
+      { ...CAMPAIGNS[1], id: 12, has_milestones: false, title: 'Plain' },
+    ]);
     render(
       <MemoryRouter>
         <Dashboard />
       </MemoryRouter>
     );
     expect(await screen.findByText('Plain')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: /request withdrawal/i })).toHaveAttribute('href', '/campaigns/12#withdrawals');
+    expect(screen.getByRole('link', { name: /request withdrawal/i })).toHaveAttribute(
+      'href',
+      '/campaigns/12#withdrawals'
+    );
   });
 
   it('shows an empty state when the creator has no campaigns', async () => {
@@ -191,7 +254,9 @@ describe('Dashboard', () => {
 
   it('shows the conversion rate when present on a contribution', async () => {
     authState.user = { ...authState.user, role: 'contributor' };
-    api.getMyContributions.mockResolvedValue([{ ...CONTRIBUTIONS[0], source_asset: 'XLM', source_amount: '10' }]);
+    api.getMyContributions.mockResolvedValue([
+      { ...CONTRIBUTIONS[0], source_asset: 'XLM', source_amount: '10' },
+    ]);
     render(
       <MemoryRouter initialEntries={['/dashboard?tab=contributions']}>
         <Dashboard />
@@ -213,7 +278,10 @@ describe('Dashboard', () => {
 
     await user.click(screen.getByRole('tab', { name: /my contributions/i }));
     expect(await screen.findByText('Garden')).toBeInTheDocument(); // contribution row title
-    expect(screen.getByRole('tab', { name: /my contributions/i })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: /my contributions/i })).toHaveAttribute(
+      'aria-selected',
+      'true'
+    );
   });
 
   it('shows an error alert when data loading fails', async () => {
@@ -229,7 +297,9 @@ describe('Dashboard', () => {
 
   it('refreshes the balance after a successful deposit', async () => {
     mockCreatorData();
-    api.getMyBalance.mockResolvedValueOnce({ balance: { USDC: '120' } }).mockResolvedValueOnce({ balance: { USDC: '320' } });
+    api.getMyBalance
+      .mockResolvedValueOnce({ balance: { USDC: '120' } })
+      .mockResolvedValueOnce({ balance: { USDC: '320' } });
     const user = userEvent.setup();
     render(
       <MemoryRouter>

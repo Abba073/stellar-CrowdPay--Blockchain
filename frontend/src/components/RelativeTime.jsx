@@ -8,10 +8,7 @@ export default function RelativeTime({ date, title }) {
   if (isNaN(dateObj.getTime())) return null;
 
   return (
-    <time
-      dateTime={dateObj.toISOString()}
-      title={title ?? dateObj.toLocaleString()}
-    >
+    <time dateTime={dateObj.toISOString()} title={title ?? dateObj.toLocaleString()}>
       {label}
     </time>
   );

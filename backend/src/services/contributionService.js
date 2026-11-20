@@ -3,7 +3,7 @@ const { withDecryptedWalletSecret } = require('./walletSecrets');
 const {
   prepareSignedContributionPayment,
   prepareSignedContributionPathPayment,
-  submitPreparedTransaction,
+  submitWithFeeBumpFallback,
   getPathPaymentQuote,
   ensureCustodialAccountFundedAndTrusted,
 } = require('./stellarService');
@@ -134,7 +134,7 @@ async function submitCustodialContribution({
   const signedXdr = preparedTransaction.signedXdr;
   let txHash;
   try {
-    txHash = await submitPreparedTransaction(signedXdr);
+    txHash = await submitWithFeeBumpFallback(signedXdr);
   } catch (err) {
     err.statusCode = err.statusCode || 502;
     throw err;

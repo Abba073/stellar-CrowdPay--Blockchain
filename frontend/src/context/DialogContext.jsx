@@ -1,3 +1,12 @@
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+
+const DialogContext = createContext(null);
+
+const FOCUSABLE_SELECTOR = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+
+export function DialogProvider({ children }) {
+  const { t } = useTranslation();
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import * as Sentry from '@sentry/react';
 
@@ -13,6 +22,7 @@ export function DialogProvider({ children }) {
   const restoreRef = useRef(null);
   const inputRef = useRef(null);
   const confirmBtnRef = useRef(null);
+  const dialogRef = useRef(null);
 
   const open = useCallback((kind, message, options = {}) => {
     restoreRef.current = document.activeElement;

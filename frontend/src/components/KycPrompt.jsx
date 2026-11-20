@@ -2,7 +2,10 @@ import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../services/api';
 
-export default function KycPrompt({ onUserUpdate, title = 'Verify your identity to create campaigns' }) {
+export default function KycPrompt({
+  onUserUpdate,
+  title = 'Verify your identity to create campaigns',
+}) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -28,9 +31,7 @@ export default function KycPrompt({ onUserUpdate, title = 'Verify your identity 
   return (
     <div className="alert alert--warning" role="status">
       <strong>{title || t('kyc.title')}</strong>
-      <p style={{ marginTop: '0.35rem' }}>
-        {t('kyc.body')}
-      </p>
+      <p style={{ marginTop: '0.35rem' }}>{t('kyc.body')}</p>
       {error && (
         <p className="alert alert--error" style={{ marginTop: '0.75rem' }} role="alert">
           {error}

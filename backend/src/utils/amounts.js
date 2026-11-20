@@ -17,6 +17,22 @@ const DECIMAL_NUMBER_RE = /^\d+(\.\d+)?$/;
 const FEE_DENOMINATOR = 10000n;
 
 /**
+ * Thrown for malformed amounts. Carries status 422 / VALIDATION_ERROR and a
+ * per-field message, so the error handler answers a client error instead of
+ * a 500 when user input reaches the parser.
+ */
+class InvalidAmountError extends Error {
+  constructor(message, field = 'amount') {
+    super(message);
+    this.name = 'InvalidAmountError';
+    this.status = 422;
+    this.code = 'VALIDATION_ERROR';
+    this.field = field;
+    this.fields = { [field]: message };
+  }
+}
+
+/**
  * Parse a decimal amount into stroops (BigInt).
  *
  * Accepts plain decimal strings (e.g. "10.5", "0.0000001") with at most 7
@@ -24,26 +40,53 @@ const FEE_DENOMINATOR = 10000n;
  * NUMERIC(20,7) storage and avoiding float rounding. Scientific notation,
  * negatives, and non-numeric input throw.
  */
-function parseAmountToStroops(input) {
+function parseAmountToStroops(input, field = 'amount') {
   let raw;
   if (typeof input === 'string') {
     raw = input.trim();
   } else if (typeof input === 'number' && Number.isFinite(input)) {
     raw = String(input);
   } else {
-    throw new TypeError(`Amount must be a number or decimal string, got: ${input}`);
+    throw new InvalidAmountError(`${field} must be a number or decimal string`, field);
   }
 
   if (raw.startsWith('+')) raw = raw.slice(1);
   if (!DECIMAL_NUMBER_RE.test(raw) || raw.includes('e') || raw.includes('E')) {
-    throw new Error(
-      `Invalid amount "${input}": expected a decimal number with at most ${MAX_DECIMALS} decimal places, e.g. "10.5"`,
+    throw new InvalidAmountError(
+      `${field} must be a decimal number with at most ${MAX_DECIMALS} decimal places, e.g. "10.5"`,
+      field,
     );
   }
 
   const [intPart, fracPart = ''] = raw.split('.');
   const frac = (fracPart + '0'.repeat(MAX_DECIMALS)).slice(0, MAX_DECIMALS);
   return BigInt(intPart) * STROOPS_PER_UNIT + BigInt(frac || '0');
+}
+
+/**
+ * Non-throwing parse: stroops, or null when the input is not a valid amount.
+ */
+function tryParseAmountToStroops(input) {
+  try {
+    return parseAmountToStroops(input);
+  } catch (err) {
+    if (err instanceof InvalidAmountError) return null;
+    throw err;
+  }
+}
+
+/**
+ * Validates a user-supplied amount with the same rules the parser uses
+ * (plain decimal, at most 7 decimal places, no exponent) and, by default,
+ * requires it to be greater than zero. Returns the stroops value or throws
+ * InvalidAmountError naming the field.
+ */
+function parseUserAmount(input, field = 'amount', { allowZero = false } = {}) {
+  const stroops = parseAmountToStroops(input, field);
+  if (!allowZero && stroops <= 0n) {
+    throw new InvalidAmountError(`${field} must be greater than zero`, field);
+  }
+  return stroops;
 }
 
 /**
@@ -109,7 +152,10 @@ function normalizeAmount(input) {
 module.exports = {
   STROOPS_PER_UNIT,
   MAX_DECIMALS,
+  InvalidAmountError,
   parseAmountToStroops,
+  tryParseAmountToStroops,
+  parseUserAmount,
   formatStroops,
   normalizeAmount,
   calculateFeeStroops,

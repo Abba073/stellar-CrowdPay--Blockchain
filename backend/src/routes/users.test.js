@@ -234,7 +234,7 @@ test('POST /api/auth/reset-password returns 400 for invalid or expired token', a
 
   assert.equal(res.status, 400);
   assert.equal(
-    res.body.error,
+    res.body.error.message,
     'Invalid or expired reset link. Please request a new one.'
   );
 });
@@ -270,5 +270,5 @@ test('POST /api/auth/login rejects old password after reset', async () => {
     .send({ email: 'user@example.com', password: 'Oldpassword1' });
 
   assert.equal(res.status, 401);
-  assert.equal(res.body.error, 'Invalid credentials');
+  assert.equal(res.body.error.message, 'Invalid credentials');
 });

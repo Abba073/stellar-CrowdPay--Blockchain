@@ -32,8 +32,8 @@ describe('CampaignCard', () => {
   it('shows progress bar width from raised_amount / target_amount', () => {
     const { container } = renderCard();
     const fill = container.querySelector('[style*="width"]');
-    const progress = Array.from(container.querySelectorAll('div')).find(
-      (el) => el.getAttribute('style')?.includes('width: 25%')
+    const progress = Array.from(container.querySelectorAll('div')).find((el) =>
+      el.getAttribute('style')?.includes('width: 25%')
     );
     expect(progress || fill).toBeTruthy();
     expect(screen.getByText(/25\.0%/)).toBeInTheDocument();

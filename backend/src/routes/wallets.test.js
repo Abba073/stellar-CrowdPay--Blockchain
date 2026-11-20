@@ -58,7 +58,7 @@ test('POST /api/wallets/:id/recover returns 400 when no secret is stored', async
     .set('Authorization', 'Bearer token');
 
   assert.equal(response.status, 400);
-  assert.match(response.body.error, /No encrypted secret stored/i);
+  assert.match(response.body.error.message, /No encrypted secret stored/i);
 });
 
 test('POST /api/wallets/:id/recover returns 403 for a non-creator', async () => {
@@ -98,5 +98,5 @@ test('POST /api/wallets/:id/recover returns 500 when the recovered key mismatche
     .set('Authorization', 'Bearer token');
 
   assert.equal(response.status, 500);
-  assert.match(response.body.error, /does not match/i);
+  assert.match(response.body.error.message, /does not match/i);
 });

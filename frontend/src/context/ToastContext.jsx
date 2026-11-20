@@ -7,7 +7,7 @@ export function ToastProvider({ children }) {
   const [toast, setToast] = useState(null);
   const show = useCallback(
     (message, type = 'success') => setToast({ message, type, id: Date.now() + Math.random() }),
-    [],
+    []
   );
   const dismiss = useCallback(() => setToast(null), []);
   return (

@@ -17,10 +17,7 @@ function TestConsumer() {
     <div>
       <div data-testid="ready">{ready ? 'ready' : 'loading'}</div>
       <div data-testid="user">{user ? JSON.stringify(user) : 'no-user'}</div>
-      <button
-        data-testid="btn-login"
-        onClick={() => login({ id: 2, name: 'Bob', is_admin: true })}
-      >
+      <button data-testid="btn-login" onClick={() => login({ id: 2, name: 'Bob', is_admin: true })}>
         Login
       </button>
       <button data-testid="btn-logout" onClick={() => logout()}>

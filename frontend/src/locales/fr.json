@@ -23,6 +23,11 @@
     "signUp": "S'inscrire",
     "yes": "Oui"
   },
+  "dialog": {
+    "confirm": "Confirmer",
+    "promptConfirm": "Envoyer",
+    "ok": "OK"
+  },
   "nav": {
     "startCampaign": "Lancer une campagne",
     "login": "Se connecter",
@@ -81,6 +86,29 @@
     "raised": "collectés",
     "backers": "{{pct}} % par {{count}} contributeurs",
     "goal": "Objectif : {{amount}} {{asset}}"
+  },
+  "forgotPassword": {
+    "title": "Mot de passe oublié ?",
+    "body": "Saisissez votre adresse e-mail et nous vous enverrons un lien pour réinitialiser votre mot de passe.",
+    "email": "E-mail",
+    "send": "Envoyer le lien",
+    "backToLogin": "Se connecter"
+  },
+  "resetPassword": {
+    "title": "Réinitialiser le mot de passe",
+    "body": "Saisissez votre nouveau mot de passe ci-dessous.",
+    "invalidTitle": "Lien invalide",
+    "invalidBody": "Ce lien de réinitialisation est invalide ou manque un jeton.",
+    "requestNew": "Demander un nouveau lien",
+    "newPassword": "Nouveau mot de passe",
+    "confirmPassword": "Confirmer le nouveau mot de passe",
+    "submit": "Réinitialiser le mot de passe",
+    "success": "Mot de passe réinitialisé avec succès ! Redirection vers la connexion...",
+    "errorMismatch": "Les mots de passe ne correspondent pas",
+    "errorTooShort": "Le mot de passe doit contenir au moins 8 caractères",
+    "errorLowercase": "Le mot de passe doit inclure une lettre minuscule",
+    "errorUppercase": "Le mot de passe doit inclure une lettre majuscule",
+    "errorNumber": "Le mot de passe doit inclure un chiffre"
   },
   "login": {
     "title": "Se connecter",
@@ -284,6 +312,9 @@
     "confirmingBody": "Votre paiement a été envoyé. Nous attendons sa confirmation sur le registre Stellar, ce qui prend généralement 3 à 5 secondes.",
     "paymentSubmitted": "Paiement envoyé",
     "paymentSubmittedBody": "Votre contribution est en route. Elle se confirme généralement en quelques secondes sur Stellar.",
+    "paymentFailed": "Échec du paiement",
+    "paymentPending": "Confirmation en attente",
+    "paymentPendingBody": "Nous n'avons pas pu confirmer si cette transaction a été inscrite au registre Stellar. Vérifiez la transaction avant de réessayer.",
     "transaction": "Transaction",
     "conversionSummary": "Résumé de conversion :",
     "anchorReference": "Référence d'ancrage :",
@@ -303,7 +334,45 @@
     "freighterError": "Le paiement Freighter n'a pas pu être envoyé. Réessayez.",
     "campaignNotFound": "Campagne introuvable ou plus active.",
     "amountAssetError": "Vérifiez votre montant et la sélection d'actif.",
-    "conversionFailed": "La conversion a échoué. Essayez un autre montant ou un autre actif."
+    "conversionFailed": "La conversion a échoué. Essayez un autre montant ou un autre actif.",
+    "limitsTitle": "Limites pour cette campagne :",
+    "limitMin": "Minimum par contribution : {{amount}} {{asset}}",
+    "limitMax": "Maximum par contribution : {{amount}} {{asset}}",
+    "limitPerUser": "Limite par contributeur : {{amount}} {{asset}}",
+    "limitPerUserRemaining": "Limite par contributeur : {{amount}} {{asset}} (Vous avez contribué {{existing}} {{asset}} ; {{remaining}} restants)",
+    "freighterNetworkMismatch": "Freighter est connecté à {{current}}. Passez sur {{expected}} et réessayez.",
+    "viewOnStellarExpert": "Voir sur Stellar Expert",
+    "viewTransactionOnStellarExpert": "Voir la transaction sur Stellar Expert",
+    "submittingWithWallet": "Envoi avec le portefeuille CrowdPay\u2026",
+    "connectingFreighter": "Connexion à Freighter\u2026",
+    "preparingTx": "Préparation de la transaction\u2026",
+    "checkingFreighterNetwork": "Vérification du réseau Freighter\u2026",
+    "waitingForSignature": "En attente de la signature\u2026",
+    "submittingSigned": "Envoi de la transaction signée\u2026",
+    "preparingDeposit": "Préparation du flux de dépôt\u2026",
+    "xlmLabel": "XLM",
+    "xlmHint": "Stellar natif",
+    "usdcLabel": "USDC",
+    "usdcHint": "Dollar stable",
+    "shareText": "Je viens de soutenir {{title}} sur CrowdPay ! Rejoignez-moi : {{url}}",
+    "installFreighter": "Installer Freighter",
+    "freighterNotDetectedLink": "L'extension Freighter n'a pas été détectée.",
+    "anchorDepositAsset": "Actif de dépôt : {{asset}} · {{environment}}",
+    "amountCreditedHelp": "Il s'agit du montant crédité vers l'objectif de la campagne, en {{asset}}.",
+    "perUserContributed": "(Vous avez contribué {{existing}} {{asset}} ; {{remaining}} restants)",
+    "aboveMaximumPerUser": "Vous avez déjà contribué {{existing}} {{asset}}. La limite par contributeur est de {{limit}} {{asset}}.",
+    "anchorDepositFailed": "Le dépôt d'ancrage n'a pas pu être finalisé.",
+    "anchorStatusError": "Impossible d'actualiser le statut du dépôt d'ancrage.",
+    "freighterNoAccount": "Freighter n'a pas renvoyé de compte Stellar.",
+    "freighterNoSigned": "Freighter n'a pas renvoyé de transaction signée.",
+    "freighterConnectError": "Impossible de se connecter à Freighter.",
+    "freighterNetworkReadError": "Impossible de lire le réseau Freighter.",
+    "freighterSignError": "Freighter n'a pas pu signer cette transaction.",
+    "noAnchorAvailable": "Aucun ancrage de dépôt n'est disponible pour le moment.",
+    "anchorDepositInfo2": "Dépôt via ancrage.",
+    "plannedContributionDetail": "jusqu'à {{maxSend}} {{sendAsset}} seront utilisés pour que la campagne reçoive {{campaignAmount}} {{campaignAsset}}.",
+    "conversionSummaryDetail": "jusqu'à {{maxSend}} {{sendAsset}} autorisés pour {{campaignAmount}} {{campaignAsset}} reçus.",
+    "feeDetail": "{{pct}}% = {{fee}} {{asset}} — la campagne reçoit {{net}} {{asset}}"
   },
   "status": {
     "goalReached": "Objectif atteint",
@@ -338,5 +407,24 @@
     "goalReached": "Objectif atteint",
     "campaignEnded": "Campagne terminée",
     "campaignClosed": "Campagne fermée"
+  },
+  "transactionStatus": {
+    "indexed": "Indexé",
+    "submitted": "Envoyé",
+    "failed": "Échoué",
+    "pendingSignatures": "Signatures en attente"
+  "categories": {
+    "technology": "Technologie",
+    "community": "Communauté",
+    "arts": "Arts et culture",
+    "education": "Éducation",
+    "environment": "Environnement",
+    "health": "Santé",
+    "business": "Commerce",
+    "open_source": "Open Source",
+    "other": "Autre",
+    "label": "Catégorie",
+    "optional": "(facultatif)",
+    "selectPlaceholder": "Sélectionner une catégorie"
   }
 }

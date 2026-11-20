@@ -59,7 +59,10 @@ beforeEach(() => {
     interactive_url: 'https://anchor.example/deposit',
     anchor_transaction_id: 'anchor-tx-9',
   });
-  api.getAnchorDepositStatus.mockResolvedValue({ id: 'deposit-1', status: 'pending_user_transfer_start' });
+  api.getAnchorDepositStatus.mockResolvedValue({
+    id: 'deposit-1',
+    status: 'pending_user_transfer_start',
+  });
 });
 
 afterEach(() => {

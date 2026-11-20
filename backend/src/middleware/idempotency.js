@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const db = require('../config/database');
 const logger = require('../config/logger');
+const { sendErrorResponse } = require('./errorHandler');
 
 const MAX_KEY_LENGTH = 255;
 
@@ -23,7 +24,7 @@ async function idempotency(req, res, next) {
   const userId = req.user?.userId;
   if (!key || !userId) return next();
   if (key.length > MAX_KEY_LENGTH) {
-    return res.status(400).json({ error: `Idempotency-Key must be at most ${MAX_KEY_LENGTH} characters` });
+    return sendErrorResponse(res, 400, `Idempotency-Key must be at most ${MAX_KEY_LENGTH} characters`);
   }
 
   const requestHash = hashRequest(req);
@@ -45,10 +46,10 @@ async function idempotency(req, res, next) {
       );
       const existing = rows[0];
       if (existing && existing.request_hash !== requestHash) {
-        return res.status(422).json({ error: 'Idempotency-Key was already used with a different request' });
+        return sendErrorResponse(res, 422, 'Idempotency-Key was already used with a different request');
       }
       if (!existing || !existing.completed_at) {
-        return res.status(409).json({ error: 'A request with this Idempotency-Key is still in progress' });
+        return sendErrorResponse(res, 409, 'A request with this Idempotency-Key is still in progress');
       }
       res.set('Idempotent-Replayed', 'true');
       return res.status(existing.response_status).json(existing.response_body);

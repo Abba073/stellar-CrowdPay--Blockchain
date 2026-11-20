@@ -25,7 +25,7 @@ export function parseAmountToStroops(input) {
   if (raw.startsWith('+')) raw = raw.slice(1);
   if (!DECIMAL_NUMBER_RE.test(raw) || raw.includes('e') || raw.includes('E')) {
     throw new Error(
-      `Invalid amount "${input}": expected a decimal number with at most ${MAX_DECIMALS} decimal places`,
+      `Invalid amount "${input}": expected a decimal number with at most ${MAX_DECIMALS} decimal places`
     );
   }
 

@@ -2,6 +2,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const db = require('../config/database');
 const Sentry = require('@sentry/node');
+const { sendErrorResponse } = require('./errorHandler');
 
 function apiKeyPepper() {
   const pepper = process.env.API_KEY_PEPPER;
@@ -71,14 +72,14 @@ async function authenticate(req) {
 
 function requireAdmin(req, res, next) {
   if (!req.user || !req.user.is_admin) {
-    return res.status(403).json({ error: 'Requires admin privileges' });
+    return sendErrorResponse(res, 403, 'Requires admin privileges');
   }
   next();
 }
 
 function requireSuperAdmin(req, res, next) {
   if (!req.user || !req.user.is_super_admin) {
-    return res.status(403).json({ error: 'Requires super-admin privileges' });
+    return sendErrorResponse(res, 403, 'Requires super-admin privileges');
   }
   next();
 }
@@ -87,10 +88,10 @@ function requireRole(...roles) {
   const allowed = new Set(roles);
   return (req, res, next) => {
     if (!req.user || !req.user.role) {
-      return res.status(403).json({ error: 'Requires authenticated user role' });
+      return sendErrorResponse(res, 403, 'Requires authenticated user role');
     }
     if (!allowed.has(req.user.role)) {
-      return res.status(403).json({ error: 'Insufficient role for this action' });
+      return sendErrorResponse(res, 403, 'Insufficient role for this action');
     }
     next();
   };
@@ -110,7 +111,7 @@ function assertApiKeyScopes(req, res) {
 
   if (path.startsWith('/api/api-keys') || path.startsWith('/api/webhooks')) {
     if (!scopes.includes('developer')) {
-      res.status(403).json({ error: 'API key requires developer scope for this resource' });
+      sendErrorResponse(res, 403, 'API key requires developer scope for this resource');
       return false;
     }
     return true;
@@ -119,13 +120,13 @@ function assertApiKeyScopes(req, res) {
   if (path.startsWith('/api/withdrawals')) {
     if (method === 'GET') {
       if (!scopes.includes('read')) {
-        res.status(403).json({ error: 'API key requires read scope' });
+        sendErrorResponse(res, 403, 'API key requires read scope');
         return false;
       }
       return true;
     }
     if (!scopes.includes('withdrawals')) {
-      res.status(403).json({ error: 'API key requires withdrawals scope for withdrawal actions' });
+      sendErrorResponse(res, 403, 'API key requires withdrawals scope for withdrawal actions');
       return false;
     }
     return true;
@@ -133,14 +134,14 @@ function assertApiKeyScopes(req, res) {
 
   if (method === 'GET' || method === 'HEAD') {
     if (!scopes.includes('read')) {
-      res.status(403).json({ error: 'API key requires read scope' });
+      sendErrorResponse(res, 403, 'API key requires read scope');
       return false;
     }
     return true;
   }
 
   if (!scopes.includes('write')) {
-    res.status(403).json({ error: 'API key requires write scope' });
+    sendErrorResponse(res, 403, 'API key requires write scope');
     return false;
   }
   return true;
@@ -154,7 +155,7 @@ function requireAuth(req, res, next) {
       // Admins are exempt so that platform staff can still access the system
       // to investigate and manage banned accounts.
       if (req.user?.is_banned && !req.user?.is_admin) {
-        return res.status(403).json({ error: 'Your account has been suspended' });
+        return sendErrorResponse(res, 403, 'Your account has been suspended');
       }
       if (!assertApiKeyScopes(req, res)) return;
       if (req.user?.userId) Sentry.setUser({ id: req.user.userId });
@@ -162,7 +163,7 @@ function requireAuth(req, res, next) {
     })
     .catch((err) => {
       const msg = err.message === 'Missing token' ? err.message : 'Unauthorized';
-      res.status(401).json({ error: msg });
+      sendErrorResponse(res, 401, msg);
     });
 }
 

@@ -32,7 +32,7 @@ describe('Home campaign fetching', () => {
     render(
       <MemoryRouter>
         <Home />
-      </MemoryRouter>,
+      </MemoryRouter>
     );
 
     const sortButtons = document.querySelectorAll('button.pill');

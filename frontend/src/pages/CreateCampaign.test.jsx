@@ -25,7 +25,9 @@ vi.mock('../components/OnboardingCallout', () => ({
   default: ({ title, onDismiss, children }) => (
     <div data-testid="onboarding-callout">
       <span>{title}</span>
-      <button type="button" onClick={onDismiss}>Got it</button>
+      <button type="button" onClick={onDismiss}>
+        Got it
+      </button>
       {children}
     </div>
   ),
@@ -71,7 +73,7 @@ const T = {
   launchCampaign: 'createCampaign.launchCampaign',
 };
 
-function fillStep1(user, { title = 'Community Garden', target = '1000' } = {}) {
+async function fillStep1(user, { title = 'Community Garden', target = '1000' } = {}) {
   if (title !== null) {
     await user.type(screen.getByLabelText(T.campaignTitle), title);
   }
@@ -106,7 +108,11 @@ describe('CreateCampaign', () => {
     updateUser.mockReset();
     mockNavigate.mockReset();
     authState.user = {
-      id: '1', name: 'Ada', email: 'ada@example.com', role: 'creator', kyc_status: 'verified',
+      id: '1',
+      name: 'Ada',
+      email: 'ada@example.com',
+      role: 'creator',
+      kyc_status: 'verified',
     };
     authState.ready = true;
   });
@@ -134,7 +140,9 @@ describe('CreateCampaign', () => {
         <CreateCampaign />
       </MemoryRouter>
     );
-    expect(screen.getByText(/only creator or admin accounts can start campaigns/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/only creator or admin accounts can start campaigns/i)
+    ).toBeInTheDocument();
     expect(api.createCampaign).not.toHaveBeenCalled();
   });
 
@@ -222,7 +230,9 @@ describe('CreateCampaign', () => {
     );
     await advanceToStep2(user);
 
-    fireEvent.change(screen.getByLabelText(/createCampaign\.deadline/), { target: { value: '2020-01-01' } });
+    fireEvent.change(screen.getByLabelText(/createCampaign\.deadline/), {
+      target: { value: '2020-01-01' },
+    });
     await user.click(screen.getByRole('button', { name: T.continueToMilestones }));
 
     expect(await screen.findByText(/deadline must be today or in the future/i)).toBeInTheDocument();
@@ -293,7 +303,9 @@ describe('CreateCampaign', () => {
     await user.type(screen.getAllByPlaceholderText('25')[1], '30');
 
     await user.click(screen.getByRole('button', { name: T.launchCampaign }));
-    expect(await screen.findByText(/milestone percentages must sum to exactly 100%/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/milestone percentages must sum to exactly 100%/i)
+    ).toBeInTheDocument();
     expect(api.createCampaign).not.toHaveBeenCalled();
   });
 
@@ -468,7 +480,11 @@ describe('CreateCampaign', () => {
 
   it('pre-fills the form from router location state', () => {
     render(
-      <MemoryRouter initialEntries={[{ pathname: '/campaigns/new', state: { prefill: { title: 'Prefilled' } } }]}>
+      <MemoryRouter
+        initialEntries={[
+          { pathname: '/campaigns/new', state: { prefill: { title: 'Prefilled' } } },
+        ]}
+      >
         <CreateCampaign />
       </MemoryRouter>
     );

@@ -26,8 +26,18 @@ Browse the interactive API docs at `GET /api/docs` (served from the same spec).
   cookie with `credentials: "include"`. Server-to-server clients may instead send
   `Authorization: Bearer <token>`, where the token is either the access token or a `cp_live_…` API key
   from `POST /api/api-keys`.
-- **Errors**: non-2xx responses have the shape `{ "error": "message" }`, and some include a
-  machine-readable `code`.
+- **Errors**: every non-2xx response has the same envelope:
+
+  ```json
+  { "error": { "code": "VALIDATION_ERROR", "message": "Human-readable message", "fields": { "amount": "Invalid amount" } } }
+  ```
+
+  `code` is always present: by default it is derived from the status (`BAD_REQUEST`, `UNAUTHORIZED`,
+  `FORBIDDEN`, `NOT_FOUND`, `CONFLICT`, `VALIDATION_ERROR` (422), `TOO_MANY_REQUESTS`,
+  `INTERNAL_ERROR`, `BAD_GATEWAY`, `SERVICE_UNAVAILABLE`), and some endpoints use a more specific one
+  (e.g. `KYC_REQUIRED`). `fields` is present for field-level validation errors. A few endpoints add
+  top-level hints next to `error` (e.g. `retryable`, `retry_after_ms`, `retry_after_seconds`).
+  Request-validation failures (`400 VALIDATION_ERROR`) also keep the raw `errors` array.
 - **Idempotency**: `POST /api/campaigns`, `POST /api/contributions/submit-signed`,
   `POST /api/withdrawals/request` and `POST /api/milestones/:id/release` (and its `/approve` alias)
   accept an optional `Idempotency-Key` header (max 255 chars). A repeated key with the same body
@@ -89,7 +99,7 @@ Deprecated aliases still respond but will be removed; new integrations must use 
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| `GET` | `/api/campaigns` | Public | List/search with filters and pagination |
+| `GET` | `/api/campaigns` | Public | List/search with filters. Paginate with `limit` + `cursor` (`next_cursor` from the previous page) for `sort=newest` / `most_funded`; `offset` still works but is slower on deep pages |
 | `POST` | `/api/campaigns` | User | Creator/admin; requires verified email (and KYC when enforced) |
 | `GET` | `/api/campaigns/mine` | User | Campaigns the user created |
 | `GET` | `/api/campaigns/categories` | Public | |
@@ -234,6 +244,7 @@ Deprecated aliases still respond but will be removed; new integrations must use 
 |---|---|---|---|
 | `GET` | `/api/config` | Public | `{ platform_fee_bps }` |
 | `GET` | `/api/stats` | Public | Landing-page totals (cached 60 s) |
+| `GET` | `/api/seo/head` | Public | HTML head fragment for campaign pages, injected by nginx SSI so crawlers see per-campaign `og:*`/`twitter:*` tags (cached 60 s) |
 | `GET` | `/health` | Public | Liveness + database connectivity; returns `{ "status": "ok" }` |
 | `GET` | `/health/ledger` | Public | Horizon stream health |
 
@@ -445,12 +456,21 @@ For a custom anchor, configure `ANCHOR_CUSTOM_ID`, `ANCHOR_CUSTOM_NAME`, `ANCHOR
 
 ### `GET /api/contributions/campaign/:campaignId`
 
-Fetch indexed contributions with conversion audit fields.
+Fetch indexed contributions with conversion audit fields, newest first.
+
+Query params: `limit` (default 20, max 100) and `cursor` (the `next_cursor` of the previous
+page). Cursor pages are index range scans, so deep pages stay fast. `offset` is still accepted
+for older clients (the response then echoes `offset` and `next_cursor` is `null`). `total` is
+only returned on the first page.
 
 Success response (`200`):
 
 ```json
-[
+{
+  "total": 128,
+  "limit": 20,
+  "next_cursor": "eyJzIjoiY29udHJpYnV0aW9uc19uZXdlc3QiLCJ2Ijoi...",
+  "contributions": [
   {
     "id": "0f3f...",
     "sender_public_key": "G...",
@@ -464,8 +484,11 @@ Success response (`200`):
     "tx_hash": "c8d6...",
     "created_at": "2026-04-23T08:13:34.392Z"
   }
-]
+  ]
+}
 ```
+
+`sender_public_key` and refund fields are only included for admins and campaign members.
 
 ### `GET /api/withdrawals/capabilities`
 

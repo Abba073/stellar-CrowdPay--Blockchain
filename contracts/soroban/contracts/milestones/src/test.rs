@@ -396,3 +396,39 @@ fn test_end_to_end_dust_sweeping_on_final_release() {
     assert_eq!(token_client.balance(&creator), 100);
     assert_eq!(token_client.balance(&escrow_id), 0);
 }
+
+#[test]
+fn test_platform_rotation_requires_acceptance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(MilestonesContract, ());
+    let client = MilestonesContractClient::new(&env, &id);
+    let (creator, platform, escrow) = (
+        Address::generate(&env),
+        Address::generate(&env),
+        Address::generate(&env),
+    );
+    let new_platform = Address::generate(&env);
+    client.initialize(&creator, &platform, &escrow, &plan(&env, &[10000]));
+
+    client.propose_platform(&new_platform);
+    client.accept_platform();
+    client.set_paused(&true);
+    assert!(client.is_paused());
+}
+
+#[test]
+fn test_paused_blocks_milestone_submission() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(MilestonesContract, ());
+    let client = MilestonesContractClient::new(&env, &id);
+    let (creator, platform, escrow) = (
+        Address::generate(&env),
+        Address::generate(&env),
+        Address::generate(&env),
+    );
+    client.initialize(&creator, &platform, &escrow, &plan(&env, &[10000]));
+    client.set_paused(&true);
+    assert!(client.try_submit_milestone(&0, &sample_hash(&env, 1)).is_err());
+}

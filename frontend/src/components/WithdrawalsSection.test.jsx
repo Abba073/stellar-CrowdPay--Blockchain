@@ -198,7 +198,9 @@ describe('WithdrawalsSection creator signing', () => {
 
   it('flags an expired XDR (410) and asks the creator to re-request', async () => {
     api.listWithdrawals.mockResolvedValue([pendingRow()]);
-    api.approveWithdrawalCreator.mockRejectedValue(Object.assign(new Error('Gone'), { status: 410 }));
+    api.approveWithdrawalCreator.mockRejectedValue(
+      Object.assign(new Error('Gone'), { status: 410 })
+    );
     const user = userEvent.setup();
     renderSection();
     await user.click(await screen.findByRole('button', { name: /sign as creator/i }));
@@ -210,10 +212,14 @@ describe('WithdrawalsSection creator signing', () => {
   it('signs in Freighter for non-custodial creators', async () => {
     api.listWithdrawals.mockResolvedValue([pendingRow()]);
     api.getWithdrawal.mockResolvedValue({ id: 'wd-1', unsigned_xdr: 'UNSIGNED' });
-    freighter.getNetwork.mockResolvedValue({ networkPassphrase: 'Test SDF Network ; September 2015' });
+    freighter.getNetwork.mockResolvedValue({
+      networkPassphrase: 'Test SDF Network ; September 2015',
+    });
     freighter.signTransaction.mockResolvedValue({ signedTxXdr: 'SIGNED' });
     const user = userEvent.setup();
-    renderSection({ user: { ...creator, wallet_type: 'freighter', wallet_public_key: 'GCREATOR' } });
+    renderSection({
+      user: { ...creator, wallet_type: 'freighter', wallet_public_key: 'GCREATOR' },
+    });
     await user.click(await screen.findByRole('button', { name: /sign in freighter/i }));
     await waitFor(() =>
       expect(api.approveWithdrawalCreator).toHaveBeenCalledWith('wd-1', { signed_xdr: 'SIGNED' })
@@ -256,10 +262,15 @@ describe('WithdrawalsSection platform approval', () => {
     const user = userEvent.setup();
     renderSection({ user: admin });
     await user.click(await screen.findByRole('button', { name: /^reject$/i }));
-    await user.type(screen.getByPlaceholderText(/reason for rejection/i), 'Destination not verified');
+    await user.type(
+      screen.getByPlaceholderText(/reason for rejection/i),
+      'Destination not verified'
+    );
     await user.click(screen.getByRole('button', { name: /confirm reject/i }));
     await waitFor(() =>
-      expect(api.rejectWithdrawal).toHaveBeenCalledWith('wd-1', { reason: 'Destination not verified' })
+      expect(api.rejectWithdrawal).toHaveBeenCalledWith('wd-1', {
+        reason: 'Destination not verified',
+      })
     );
     expect(api.approveWithdrawalPlatform).not.toHaveBeenCalled();
   });
@@ -275,7 +286,12 @@ describe('WithdrawalsSection platform approval', () => {
 
   it('links released withdrawals to the explorer and loads the audit trail', async () => {
     api.listWithdrawals.mockResolvedValue([
-      pendingRow({ status: 'submitted', creator_signed: true, platform_signed: true, tx_hash: 'txhash1' }),
+      pendingRow({
+        status: 'submitted',
+        creator_signed: true,
+        platform_signed: true,
+        tx_hash: 'txhash1',
+      }),
     ]);
     api.getWithdrawalEvents.mockResolvedValue([
       { id: 'e1', action: 'requested', created_at: new Date().toISOString() },
@@ -311,7 +327,9 @@ describe('WithdrawalsSection milestone releases', () => {
     const user = userEvent.setup();
     renderSection({ milestones });
     await user.click(await screen.findByRole('button', { name: /request milestone release/i }));
-    expect(screen.getByRole('alert')).toHaveTextContent(/evidence and payout destination are both required/i);
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      /evidence and payout destination are both required/i
+    );
     expect(api.submitMilestoneEvidence).not.toHaveBeenCalled();
   });
 

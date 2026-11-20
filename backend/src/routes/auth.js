@@ -11,6 +11,7 @@ const { sendEmail, sendEmailSafe, reserveEmailSend } = require('../services/emai
 const { requireAuth } = require('../middleware/auth');
 const { encryptWalletSecret } = require('../services/walletSecrets');
 const { isKycRequiredForCampaigns } = require('../services/kycProvider');
+const loginLockout = require('../services/loginLockout');
 const {
   registerValidation,
   loginValidation,
@@ -20,6 +21,7 @@ const {
   validateRequestAsError,
 } = require('../middleware/validation');
 const asyncHandler = require('../utils/asyncHandler');
+const { sendErrorResponse } = require('../middleware/errorHandler');
 
 /**
  * @openapi
@@ -85,6 +87,19 @@ const loginLimiter = rateLimit({
   legacyHeaders: false,
   skip: () => isTest,
 });
+
+/** 429 for a locked (or hourly-capped) account; same response whether or not it exists. */
+function sendAccountLocked(res, retryAfterSeconds) {
+  res.set('Retry-After', String(retryAfterSeconds));
+  return sendErrorResponse(
+    res,
+    429,
+    'Too many failed login attempts for this account. Try again later.',
+    undefined,
+    'ACCOUNT_LOCKED',
+    { retry_after_seconds: retryAfterSeconds }
+  );
+}
 
 function hashToken(token) {
   return crypto.createHash('sha256').update(token, 'utf8').digest('hex');
@@ -295,12 +310,12 @@ router.post('/register', registerLimiter, registerValidation, validateRequest, a
   const allowedRoles = new Set(['contributor', 'creator']);
   const userRole = role || 'contributor';
   if (!allowedRoles.has(userRole)) {
-    return res.status(400).json({ error: 'role must be contributor or creator' });
+    return sendErrorResponse(res, 400, 'role must be contributor or creator');
   }
 
   const existing = await db.query('SELECT id FROM users WHERE LOWER(email) = $1', [normalizedEmail]);
   if (existing.rows.length > 0) {
-    return res.status(409).json({ error: 'Email already registered' });
+    return sendErrorResponse(res, 409, 'Email already registered');
   }
 
   const passwordHash = await bcrypt.hash(password, 10);
@@ -316,7 +331,7 @@ router.post('/register', registerLimiter, registerValidation, validateRequest, a
     try {
       Keypair.fromPublicKey(publicKey);
     } catch (_err) {
-      return res.status(400).json({ error: 'A valid wallet_public_key is required for Freighter registration' });
+      return sendErrorResponse(res, 400, 'A valid wallet_public_key is required for Freighter registration');
     }
     encryptedSecret = null;
   } else {
@@ -426,11 +441,28 @@ router.post('/login', loginLimiter, loginValidation, validateRequest, asyncHandl
    */
   const { email, password } = req.body;
   const normalizedEmail = String(email || '').trim().toLowerCase();
+
+  // Per-account protection, checked before any password comparison: a locked
+  // email is rejected even with the correct password.
+  const gate = await loginLockout.checkLoginAllowed(db, normalizedEmail, { ip: req.ip });
+  if (!gate.allowed) {
+    return sendAccountLocked(res, gate.retryAfterSeconds);
+  }
+
   const { rows } = await db.query('SELECT * FROM users WHERE LOWER(email) = $1', [normalizedEmail]);
 
   if (!rows.length || !(await bcrypt.compare(password, rows[0].password_hash))) {
-    return res.status(401).json({ error: 'Invalid credentials' });
+    const failure = await loginLockout.recordLoginFailure(db, normalizedEmail, {
+      userId: rows[0]?.id ?? null,
+      ip: req.ip,
+    });
+    if (failure.locked) {
+      return sendAccountLocked(res, Math.ceil((failure.lockedUntil - Date.now()) / 1000));
+    }
+    return sendErrorResponse(res, 401, 'Invalid credentials');
   }
+
+  await loginLockout.recordLoginSuccess(db, normalizedEmail, { userId: rows[0].id, ip: req.ip });
 
   const user = rows[0];
   const { accessToken } = generateTokens(user);
@@ -498,18 +530,16 @@ router.post('/login', loginLimiter, loginValidation, validateRequest, asyncHandl
 router.post('/refresh', asyncHandler(async (req, res) => {
   const token = req.cookies?.[REFRESH_TOKEN_COOKIE_NAME];
   if (!token) {
-    return res.status(401).json({ error: 'No refresh token provided' });
+    return sendErrorResponse(res, 401, 'No refresh token provided');
   }
 
   const user = await validateRefreshToken(token);
   if (!user || user.reuseDetected) {
     clearRefreshTokenCookie(res);
     clearAccessTokenCookie(res);
-    return res.status(401).json({
-      error: user?.reuseDetected
+    return sendErrorResponse(res, 401, user?.reuseDetected
         ? 'Refresh token reuse detected; session revoked'
-        : 'Invalid or expired refresh token',
-    });
+        : 'Invalid or expired refresh token');
   }
 
   const { accessToken } = generateTokens(user);
@@ -598,7 +628,7 @@ const resendVerificationLimiter = rateLimit({
 router.post('/verify-email', async (req, res) => {
   const { token } = req.body || {};
   if (!token) {
-    return res.status(400).json({ error: 'Verification token is required' });
+    return sendErrorResponse(res, 400, 'Verification token is required');
   }
 
   const { rows } = await db.query(
@@ -609,7 +639,7 @@ router.post('/verify-email', async (req, res) => {
   );
 
   if (!rows.length) {
-    return res.status(400).json({ error: 'Invalid or expired verification link.' });
+    return sendErrorResponse(res, 400, 'Invalid or expired verification link.');
   }
 
   const user = rows[0];
@@ -620,10 +650,7 @@ router.post('/verify-email', async (req, res) => {
 
   const sentAt = user.verification_sent_at ? new Date(user.verification_sent_at) : null;
   if (!sentAt || Date.now() - sentAt.getTime() > EMAIL_VERIFICATION_TTL_MS) {
-    return res.status(400).json({
-      error: 'Verification link has expired. Please request a new one.',
-      code: 'VERIFICATION_EXPIRED',
-    });
+    return sendErrorResponse(res, 400, 'Verification link has expired. Please request a new one.', undefined, 'VERIFICATION_EXPIRED');
   }
 
   await db.query(
@@ -660,28 +687,23 @@ router.post('/resend-verification', resendVerificationLimiter, requireAuth, asyn
   );
 
   if (!rows.length) {
-    return res.status(404).json({ error: 'User not found' });
+    return sendErrorResponse(res, 404, 'User not found');
   }
 
   const user = rows[0];
 
   if (user.email_verified) {
-    return res.status(400).json({ error: 'Email is already verified.' });
+    return sendErrorResponse(res, 400, 'Email is already verified.');
   }
 
   // Enforce cooldown to prevent spam
   const lastSent = user.verification_sent_at ? new Date(user.verification_sent_at) : null;
   if (lastSent && Date.now() - lastSent.getTime() < RESEND_COOLDOWN_MS) {
-    return res.status(429).json({
-      error: 'Please wait before requesting another verification email.',
-      retry_after_ms: RESEND_COOLDOWN_MS - (Date.now() - lastSent.getTime()),
-    });
+    return sendErrorResponse(res, 429, 'Please wait before requesting another verification email.', undefined, undefined, { retry_after_ms: RESEND_COOLDOWN_MS - (Date.now() - lastSent.getTime()) });
   }
 
   if (!(await reserveEmailSend(user.email, 'email_verification', RESEND_COOLDOWN_MS))) {
-    return res.status(429).json({
-      error: 'Please wait before requesting another verification email.',
-    });
+    return sendErrorResponse(res, 429, 'Please wait before requesting another verification email.');
   }
 
   const verificationToken = crypto.randomBytes(32).toString('hex');
@@ -850,9 +872,7 @@ router.post(
     );
 
     if (!rows.length) {
-      return res.status(400).json({
-        error: 'Invalid or expired reset link. Please request a new one.',
-      });
+      return sendErrorResponse(res, 400, 'Invalid or expired reset link. Please request a new one.');
     }
 
     const resetToken = rows[0];

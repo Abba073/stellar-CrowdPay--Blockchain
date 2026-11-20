@@ -81,7 +81,13 @@ describe('api transport', () => {
 
   it('handles server error with structured error body', async () => {
     mockFetch(
-      { error: { message: 'Invalid field value', code: 'INVALID_INPUT', fields: { amount: 'Must be positive' } } },
+      {
+        error: {
+          message: 'Invalid field value',
+          code: 'INVALID_INPUT',
+          fields: { amount: 'Must be positive' },
+        },
+      },
       { status: 400, ok: false }
     );
 
@@ -162,7 +168,10 @@ describe('api transport', () => {
     });
     vi.stubGlobal('fetch', fetchFn);
 
-    await expect(api.getMe()).rejects.toThrow('Session expired. Please log in again.');
+    await expect(api.getMe()).rejects.toMatchObject({
+      message: 'Session expired. Please log in again.',
+      status: 401,
+    });
   });
 
   it('does not attempt refresh for public auth endpoints on 401', async () => {

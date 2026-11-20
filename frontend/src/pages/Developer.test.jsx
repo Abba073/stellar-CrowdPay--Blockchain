@@ -22,15 +22,49 @@ vi.mock('../context/AuthContext', () => ({ useAuth: () => authState }));
 const confirmSpy = vi.spyOn(window, 'confirm');
 
 const KEYS = [
-  { id: 'k1', label: 'Backend', key_prefix: 'cpk_live_12', scopes: ['read', 'write'], revoked_at: null, last_used_at: null },
-  { id: 'k2', label: 'Old', key_prefix: 'cpk_live_99', scopes: ['read'], revoked_at: '2024-01-01', last_used_at: null },
+  {
+    id: 'k1',
+    label: 'Backend',
+    key_prefix: 'cpk_live_12',
+    scopes: ['read', 'write'],
+    revoked_at: null,
+    last_used_at: null,
+  },
+  {
+    id: 'k2',
+    label: 'Old',
+    key_prefix: 'cpk_live_99',
+    scopes: ['read'],
+    revoked_at: '2024-01-01',
+    last_used_at: null,
+  },
 ];
 const HOOKS = [
-  { id: 'h1', url: 'https://example.com/hook', events: ['contribution.received'], secret_hint: 'sec_***', revoked_at: null },
-  { id: 'h2', url: 'https://old.example.com', events: [], secret_hint: 'sec_***', revoked_at: '2024-01-01' },
+  {
+    id: 'h1',
+    url: 'https://example.com/hook',
+    events: ['contribution.received'],
+    secret_hint: 'sec_***',
+    revoked_at: null,
+  },
+  {
+    id: 'h2',
+    url: 'https://old.example.com',
+    events: [],
+    secret_hint: 'sec_***',
+    revoked_at: '2024-01-01',
+  },
 ];
 const DELIVERIES = [
-  { id: 'd1', created_at: '2024-06-01T10:00:00Z', event_type: 'contribution.received', status: 'success', response_status: 200, attempt_count: 1, last_error: null },
+  {
+    id: 'd1',
+    created_at: '2024-06-01T10:00:00Z',
+    event_type: 'contribution.received',
+    status: 'success',
+    response_status: 200,
+    attempt_count: 1,
+    last_error: null,
+  },
 ];
 
 function mockInitialData() {
@@ -163,7 +197,9 @@ describe('Developer', () => {
     );
     await screen.findByText('Backend');
 
-    const revokeButton = within(screen.getByText('Backend').closest('tr')).getByRole('button', { name: /revoke/i });
+    const revokeButton = within(screen.getByText('Backend').closest('tr')).getByRole('button', {
+      name: /revoke/i,
+    });
     await user.click(revokeButton);
 
     expect(confirmSpy).toHaveBeenCalled();
@@ -183,7 +219,9 @@ describe('Developer', () => {
     );
     await screen.findByText('Backend');
 
-    const revokeButton = within(screen.getByText('Backend').closest('tr')).getByRole('button', { name: /revoke/i });
+    const revokeButton = within(screen.getByText('Backend').closest('tr')).getByRole('button', {
+      name: /revoke/i,
+    });
     await user.click(revokeButton);
 
     expect(api.deleteApiKey).not.toHaveBeenCalled();
@@ -200,7 +238,10 @@ describe('Developer', () => {
     );
     await screen.findByText('Backend');
 
-    await user.type(screen.getByPlaceholderText(/crowdpay-webhook/i), 'https://new.example.com/hook');
+    await user.type(
+      screen.getByPlaceholderText(/crowdpay-webhook/i),
+      'https://new.example.com/hook'
+    );
     await user.click(screen.getByRole('button', { name: /add endpoint/i }));
 
     await waitFor(() => {
@@ -226,7 +267,9 @@ describe('Developer', () => {
     );
     await screen.findByText('https://example.com/hook');
 
-    const removeButton = within(screen.getByText('https://example.com/hook').closest('li')).getByRole('button', { name: /remove/i });
+    const removeButton = within(
+      screen.getByText('https://example.com/hook').closest('li')
+    ).getByRole('button', { name: /remove/i });
     await user.click(removeButton);
 
     expect(confirmSpy).toHaveBeenCalled();

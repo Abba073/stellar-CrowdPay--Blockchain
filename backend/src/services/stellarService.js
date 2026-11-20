@@ -815,6 +815,7 @@ module.exports = {
   submitPayment,
   submitPathPayment,
   submitPreparedTransaction,
+  submitWithFeeBumpFallback,
   getPathPaymentQuote,
   validateWithdrawalParams,
   buildWithdrawalTransaction,

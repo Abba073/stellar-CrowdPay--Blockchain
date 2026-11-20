@@ -50,7 +50,10 @@ describe('AcceptInvite', () => {
     renderInvite();
     expect(screen.getByText(/must be logged in/i)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /log in/i })).toHaveAttribute('href', '/login');
-    expect(screen.getByRole('link', { name: /create account/i })).toHaveAttribute('href', '/register');
+    expect(screen.getByRole('link', { name: /create account/i })).toHaveAttribute(
+      'href',
+      '/register'
+    );
   });
 
   it('renders the invitation screen for a logged-in user', () => {

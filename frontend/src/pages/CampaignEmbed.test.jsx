@@ -62,9 +62,7 @@ describe('CampaignEmbed', () => {
     render(<CampaignEmbed />);
 
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining('/api/campaigns/7/embed')
-      );
+      expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/api/campaigns/7/embed'));
     });
 
     expect(await screen.findByText('Community Garden')).toBeInTheDocument();

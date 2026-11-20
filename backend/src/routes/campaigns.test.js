@@ -44,6 +44,16 @@ function buildApp({
     '../services/ledgerMonitor': {
       watchCampaignWallet: async () => {},
     },
+    // Real validation rules, minus the Stellar service they import for asset codes.
+    '../middleware/validation': proxyquire('../middleware/validation', {
+      '../services/stellarService': { getSupportedAssetCodes: () => ['XLM', 'USDC'] },
+    }),
+    // Real module pulls in Soroban RPC / circuit-breaker config; not under test here.
+    '../services/sorobanService': {
+      provisionCampaignContracts: async () => ({}),
+      isValidContractId: (id) => /^C[A-Z2-7]{55}$/.test(String(id)),
+      isSorobanEnabled: () => false,
+    },
     '../services/stellarTransactionService': {
       insertWithdrawalPendingSignatures: insertWithdrawalPendingSignaturesImpl,
     },
@@ -286,7 +296,7 @@ test('POST /api/campaigns returns 500 and logs orphaned wallet when DB insert fa
     .send({ title: 'Broken campaign', target_amount: '100', asset_type: 'USDC' });
 
   assert.equal(response.status, 500);
-  assert.match(response.body.error, /contact support/i);
+  assert.match(response.body.error.message, /contact support/i);
 });
 
 test('POST /api/campaigns returns 400 with validation errors for invalid payload', async () => {
@@ -448,6 +458,45 @@ test('GET /api/campaigns/:id is read-only and does not mutate status', async () 
   assert.equal(refreshCalled, false, 'GET must never trigger refreshCampaignStatus write side-effects');
 });
 
+test('GET /api/campaigns/:id returns the caller contributed total for the per-user cap', async () => {
+  const jwt = require('jsonwebtoken');
+  const token = jwt.sign({ userId: 'user-1' }, process.env.JWT_SECRET || 'test-secret-for-unit-tests');
+  const app = buildApp({
+    queryImpl: async (text) => {
+      if (text.includes('SELECT *,') ) {
+        return {
+          rows: [
+            {
+              id: 'c4a96b7d-6dc2-48ec-b12d-d602cb11b987',
+              creator_id: 'creator-1',
+              title: 'Per User Cap Test',
+              status: 'active',
+              target_amount: '100',
+              raised_amount: '10',
+              asset_type: 'XLM',
+              max_per_user: '50',
+            },
+          ],
+        };
+      }
+      if (text.includes('SELECT wallet_public_key FROM users')) {
+        return { rows: [{ wallet_public_key: 'GUSER' }] };
+      }
+      if (text.includes('COALESCE(SUM(amount)')) {
+        return { rows: [{ total: '30' }] };
+      }
+      return { rows: [] };
+    },
+  });
+
+  const response = await request(app)
+    .get('/api/campaigns/c4a96b7d-6dc2-48ec-b12d-d602cb11b987')
+    .set('Authorization', `Bearer ${token}`);
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.user_contributed_amount, 30);
+});
+
 test('POST /api/campaigns/:id/refresh-status allows authorized creator or admin', async () => {
   let refreshCalled = false;
   const app = buildApp({
@@ -509,7 +558,7 @@ test('POST /campaigns/:id/members/accept rejects token with mismatched email (40
     .send({ token: 'validtoken123' });
 
   assert.equal(response.status, 403);
-  assert.match(response.body.error, /different email/i);
+  assert.match(response.body.error.message, /different email/i);
 });
 
 test('POST /campaigns/:id/members/accept succeeds when emails match', async () => {
@@ -577,7 +626,7 @@ test('POST /campaigns/:id/members/accept rejects expired invites (410)', async (
     .send({ token: 'expiredtoken' });
 
   assert.equal(response.status, 410);
-  assert.match(response.body.error, /expired/i);
+  assert.match(response.body.error.message, /expired/i);
 });
 
 test('POST /campaigns/:id/members/accept rejects already-accepted invite (409)', async () => {
@@ -604,7 +653,7 @@ test('POST /campaigns/:id/members/accept rejects already-accepted invite (409)',
     .send({ token: 'usedtoken' });
 
   assert.equal(response.status, 409);
-  assert.match(response.body.error, /already accepted/i);
+  assert.match(response.body.error.message, /already accepted/i);
 });
 
 test('POST /campaigns/:id/members/accept returns 404 for invalid token', async () => {
@@ -619,4 +668,101 @@ test('POST /campaigns/:id/members/accept returns 404 for invalid token', async (
     .send({ token: 'nosuchtoken' });
 
   assert.equal(response.status, 404);
+});
+
+// ---- soft-deleted campaigns ---------------------------------------------------
+
+test('a soft-deleted campaign 404s on its secondary endpoints', async () => {
+  const DELETED_ID = '3f2b8c1e-1d2a-4b3c-9d4e-5f6a7b8c9d0e';
+  // Only hides the campaign when the query filters on deleted_at.
+  const queryImpl = async (text) => {
+    if (/FROM campaigns\b/.test(text) || /JOIN campaigns c\b/.test(text)) {
+      if (/deleted_at IS NULL/.test(text)) return { rows: [] };
+      return { rows: [{ id: DELETED_ID, creator_id: 'platform-1', show_backer_amounts: true, wallet_public_key: 'G', deleted_at: new Date() }] };
+    }
+    return { rows: [{ id: 'm1', sender_public_key: 'GPII', amount: '5' }] };
+  };
+  const app = buildApp({ queryImpl });
+
+  for (const path of [
+    `/api/campaigns/${DELETED_ID}`,
+    `/api/campaigns/${DELETED_ID}/backers`,
+    `/api/campaigns/${DELETED_ID}/milestones`,
+    `/api/campaigns/${DELETED_ID}/balance`,
+    `/api/campaigns/${DELETED_ID}/analytics`,
+  ]) {
+    const res = await request(app).get(path);
+    assert.equal(res.status, 404, `${path} -> ${res.status}`);
+    assert.ok(!JSON.stringify(res.body).includes('GPII'), path);
+  }
+});
+
+// ---- keyset pagination -------------------------------------------------------
+
+function listingRows(n, start = 0) {
+  return Array.from({ length: n }, (_, i) => ({
+    id: `00000000-0000-4000-8000-${String(start + i).padStart(12, '0')}`,
+    title: `Campaign ${start + i}`,
+    status: 'active',
+    _cursor_value: `2026-10-21 10:${String(59 - (start + i)).padStart(2, '0')}:00.000001+00`,
+  }));
+}
+
+function listingApp(rows) {
+  const queries = [];
+  const app = buildApp({
+    queryImpl: async (text, params) => {
+      queries.push({ text, params });
+      if (text.includes('COUNT(*)::int AS total FROM campaigns')) return { rows: [{ total: 7 }] };
+      return { rows };
+    },
+  });
+  return { app, queries };
+}
+
+test('GET /api/campaigns pages newest campaigns by cursor', async () => {
+  const first = listingApp(listingRows(3));
+  const page1 = await request(first.app).get('/api/campaigns?limit=2');
+  assert.equal(page1.status, 200);
+  assert.equal(page1.body.total, 7);
+  assert.equal(page1.body.campaigns.length, 2);
+  assert.ok(page1.body.next_cursor);
+  assert.ok(!('_cursor_value' in page1.body.campaigns[0]));
+  const q1 = first.queries.find((q) => q.text.includes('ORDER BY'));
+  assert.match(q1.text, /ORDER BY c\.created_at DESC, c\.id DESC/);
+  assert.doesNotMatch(q1.text, /OFFSET/);
+  assert.equal(q1.params[q1.params.length - 1], 3, 'fetches limit + 1');
+
+  const second = listingApp(listingRows(1, 2));
+  const page2 = await request(second.app).get(`/api/campaigns?limit=2&cursor=${page1.body.next_cursor}`);
+  assert.equal(page2.status, 200);
+  assert.equal(page2.body.next_cursor, null);
+  assert.ok(!('total' in page2.body), 'no count query after the first page');
+  assert.ok(!second.queries.some((q) => q.text.includes('COUNT(*)::int AS total FROM campaigns')));
+  const q2 = second.queries.find((q) => q.text.includes('ORDER BY'));
+  assert.match(q2.text, /\(c\.created_at, c\.id\) < \(\$\d+::timestamptz, \$\d+::uuid\)/);
+  assert.ok(q2.params.includes('2026-10-21 10:58:00.000001+00'));
+  assert.ok(q2.params.includes('00000000-0000-4000-8000-000000000001'));
+});
+
+test('GET /api/campaigns supports cursors for sort=most_funded and rejects cursors from another sort', async () => {
+  const { app, queries } = listingApp(listingRows(3));
+  const res = await request(app).get('/api/campaigns?sort=most_funded&limit=2');
+  assert.match(queries.find((q) => q.text.includes('ORDER BY')).text, /ORDER BY c\.raised_amount DESC, c\.id DESC/);
+
+  const mismatch = await request(listingApp([]).app).get(`/api/campaigns?sort=newest&cursor=${res.body.next_cursor}`);
+  assert.equal(mismatch.status, 400);
+  assert.equal(mismatch.body.error.code, 'INVALID_CURSOR');
+});
+
+test('GET /api/campaigns keeps legacy offset paging and refuses cursors on other sorts', async () => {
+  const { app, queries } = listingApp(listingRows(2));
+  const res = await request(app).get('/api/campaigns?limit=2&offset=20');
+  assert.equal(res.status, 200);
+  assert.equal(res.body.offset, 20);
+  assert.equal(res.body.next_cursor, null);
+  assert.match(queries.find((q) => q.text.includes('ORDER BY')).text, /OFFSET/);
+
+  const trending = await request(listingApp([]).app).get('/api/campaigns?sort=trending&cursor=abc');
+  assert.equal(trending.status, 400);
 });

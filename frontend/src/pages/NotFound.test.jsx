@@ -32,7 +32,10 @@ describe('NotFound', () => {
       </MemoryRouter>
     );
     expect(screen.getByRole('link', { name: 'Home' })).toHaveAttribute('href', '/');
-    expect(screen.getByRole('link', { name: /create a campaign/i })).toHaveAttribute('href', '/campaigns/new');
+    expect(screen.getByRole('link', { name: /create a campaign/i })).toHaveAttribute(
+      'href',
+      '/campaigns/new'
+    );
     expect(screen.getByRole('link', { name: /dashboard/i })).toHaveAttribute('href', '/dashboard');
   });
 

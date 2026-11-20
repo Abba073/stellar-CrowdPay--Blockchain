@@ -300,7 +300,7 @@ test('POST /api/withdrawals/:id/approve/platform denies before creator approval'
 
   cleanup();
   assert.equal(response.status, 409);
-  assert.match(response.body.error, /Creator approval/);
+  assert.match(response.body.error.message, /Creator approval/);
 });
 
 test('POST /api/withdrawals/:id/approve/creator signs withdrawal request', async () => {
@@ -581,7 +581,7 @@ test('POST /api/withdrawals/:id/approve/platform returns 410 when XDR time bound
 
   cleanup();
   assert.equal(response.status, 410);
-  assert.match(response.body.error, /expired/i);
+  assert.match(response.body.error.message, /expired/i);
 });
 
 function approveQueryImpl({ failUpdate = false, state = { status: 'pending' } } = {}) {

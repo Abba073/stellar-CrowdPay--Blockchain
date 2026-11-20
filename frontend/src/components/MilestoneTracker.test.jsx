@@ -44,8 +44,12 @@ describe('MilestoneTracker', () => {
     expect(articles).toHaveLength(3);
     expect(within(articles[0]).getByText('Milestone 1')).toBeInTheDocument();
     expect(within(articles[2]).getByText('Milestone 3')).toBeInTheDocument();
-    expect(within(card('Prototype')).getByText(/releases 25% of campaign funds in USDC/i)).toBeInTheDocument();
-    expect(within(card('Pilot')).getByText(/releases 35% of campaign funds in USDC/i)).toBeInTheDocument();
+    expect(
+      within(card('Prototype')).getByText(/releases 25% of campaign funds in USDC/i)
+    ).toBeInTheDocument();
+    expect(
+      within(card('Pilot')).getByText(/releases 35% of campaign funds in USDC/i)
+    ).toBeInTheDocument();
   });
 
   it('maps release status to Released / Approved / Pending badges', () => {

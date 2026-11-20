@@ -52,6 +52,9 @@ pub enum DataKey {
     Milestones,
     Initialized,
     Released,
+    Paused,
+    PendingPlatform,
+    Version,
 }
 
 /// Validates a milestone plan: non-empty, max 32 entries, every entry > 0 bps, sum == 10000.
@@ -111,6 +114,7 @@ impl MilestonesContract {
     }
 
     pub fn submit_milestone(env: Env, index: u32, evidence_hash: BytesN<32>) {
+        Self::require_not_paused(&env);
         let creator: Address = env.storage().instance().get(&DataKey::Creator).expect("Not initialized");
         creator.require_auth();
 
@@ -134,6 +138,7 @@ impl MilestonesContract {
     }
 
     pub fn approve_milestone(env: Env, index: u32) {
+        Self::require_not_paused(&env);
         let platform: Address = env.storage().instance().get(&DataKey::Platform).expect("Not initialized");
         platform.require_auth();
 
@@ -184,6 +189,7 @@ impl MilestonesContract {
     }
 
     pub fn reject_milestone(env: Env, index: u32, reason_hash: BytesN<32>) {
+        Self::require_not_paused(&env);
         let platform: Address = env.storage().instance().get(&DataKey::Platform).expect("Not initialized");
         platform.require_auth();
 
@@ -203,6 +209,63 @@ impl MilestonesContract {
             (symbol_short!("reject"), index),
             reason_hash,
         );
+    }
+
+    /// Propose a new platform key. Takes effect when the nominee accepts.
+    pub fn propose_platform(env: Env, new_platform: Address) {
+        let platform: Address = env.storage().instance().get(&DataKey::Platform).expect("Not initialized");
+        platform.require_auth();
+        env.storage().instance().set(&DataKey::PendingPlatform, &new_platform);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_BUMP);
+    }
+
+    /// Accept a pending platform nomination. Must be called by the nominee.
+    pub fn accept_platform(env: Env) {
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingPlatform)
+            .expect("No pending platform");
+        pending.require_auth();
+        env.storage().instance().set(&DataKey::Platform, &pending);
+        env.storage().instance().remove(&DataKey::PendingPlatform);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_BUMP);
+    }
+
+    /// Freeze/unfreeze milestone submission and approval during an incident.
+    pub fn set_paused(env: Env, paused: bool) {
+        let platform: Address = env.storage().instance().get(&DataKey::Platform).expect("Not initialized");
+        platform.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &paused);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_BUMP);
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage().instance().get(&DataKey::Paused).unwrap_or(false)
+    }
+
+    /// Record a migration version. Soroban contracts are upgraded by deploying a
+    /// new contract and updating the registry; this entrypoint records the bump.
+    pub fn migrate(env: Env, version: u32) {
+        let platform: Address = env.storage().instance().get(&DataKey::Platform).expect("Not initialized");
+        platform.require_auth();
+        let current: u32 = env.storage().instance().get(&DataKey::Version).unwrap_or(0);
+        if version <= current {
+            panic!("Version must increase");
+        }
+        env.storage().instance().set(&DataKey::Version, &version);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_BUMP);
+    }
+
+    pub fn get_version(env: Env) -> u32 {
+        env.storage().instance().get(&DataKey::Version).unwrap_or(0)
+    }
+
+    fn require_not_paused(env: &Env) {
+        let paused: bool = env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+        if paused {
+            panic!("Contract is paused");
+        }
     }
 
     pub fn get_milestone(env: Env, index: u32) -> Milestone {

@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const { Keypair } = require('@stellar/stellar-sdk');
 const db = require('../config/database');
+const { findVisibleCampaign } = require('../utils/campaignVisibility');
 const logger = require('../config/logger');
 const { requireAuth } = require('../middleware/auth');
 const { idempotency } = require('../middleware/idempotency');
@@ -24,6 +25,7 @@ const {
   parseAmountToStroops,
   formatStroops,
 } = require('../utils/amounts');
+const { sendErrorResponse } = require('../middleware/errorHandler');
 
 function canPerformPlatformSignature(userId) {
   if (!process.env.PLATFORM_APPROVER_USER_ID) return false;
@@ -121,6 +123,9 @@ async function setCampaignStatusFromMilestoneProgress(client, campaignId) {
  *                 $ref: '#/components/schemas/Milestone'
  */
 router.get('/campaign/:campaignId', async (req, res) => {
+  if (!(await findVisibleCampaign(db, req.params.campaignId))) {
+    return res.status(404).json({ error: 'Campaign not found' });
+  }
   const { rows } = await db.query(
     `SELECT m.*, 
             (c.milestones_contract_id IS NOT NULL AND c.soroban_status = 'verified') AS on_chain
@@ -190,12 +195,12 @@ router.post('/', requireAuth, async (req, res) => {
   } = req.body || {};
 
   if (!campaignId || !title || releasePercentage == null) { // eslint-disable-line eqeqeq
-    return res.status(400).json({ error: 'campaign_id, title and release_percentage are required' });
+    return sendErrorResponse(res, 400, 'campaign_id, title and release_percentage are required');
   }
 
   const percentage = Number(releasePercentage);
   if (!Number.isFinite(percentage) || percentage <= 0 || percentage > 100) {
-    return res.status(400).json({ error: 'release_percentage must be between 0 and 100' });
+    return sendErrorResponse(res, 400, 'release_percentage must be between 0 and 100');
   }
 
   const client = await db.connect();
@@ -207,11 +212,11 @@ router.post('/', requireAuth, async (req, res) => {
     );
     if (!camp.length) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Campaign not found' });
+      return sendErrorResponse(res, 404, 'Campaign not found');
     }
     if (camp[0].creator_id !== req.user.userId) {
       await client.query('ROLLBACK');
-      return res.status(403).json({ error: 'Only the campaign creator can add milestones' });
+      return sendErrorResponse(res, 403, 'Only the campaign creator can add milestones');
     }
 
     const { rows: stats } = await client.query(
@@ -224,13 +229,13 @@ router.post('/', requireAuth, async (req, res) => {
     );
     if ((stats[0]?.count || 0) >= MILESTONE_LIMIT) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: `Campaigns can define at most ${MILESTONE_LIMIT} milestones` });
+      return sendErrorResponse(res, 400, `Campaigns can define at most ${MILESTONE_LIMIT} milestones`);
     }
 
     const newTotal = Number(stats[0]?.total_percentage || 0) + percentage;
     if (newTotal > 100.0001) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Milestone release percentages cannot exceed 100% total' });
+      return sendErrorResponse(res, 400, 'Milestone release percentages cannot exceed 100% total');
     }
 
     const { rows } = await client.query(
@@ -243,7 +248,7 @@ router.post('/', requireAuth, async (req, res) => {
     res.status(201).json(rows[0]);
   } catch (err) {
     await client.query('ROLLBACK');
-    res.status(500).json({ error: 'Could not create milestone' });
+    sendErrorResponse(res, 500, 'Could not create milestone');
   } finally {
     client.release();
   }
@@ -302,10 +307,10 @@ router.post('/', requireAuth, async (req, res) => {
 router.post('/:id/submit', requireAuth, async (req, res) => {
   const { evidence_url: evidenceUrl, destination_key: destinationKey } = req.body || {};
   if (!evidenceUrl || !destinationKey) {
-    return res.status(400).json({ error: 'evidence_url and destination_key are required' });
+    return sendErrorResponse(res, 400, 'evidence_url and destination_key are required');
   }
   if (!validatePublicKey(destinationKey)) {
-    return res.status(400).json({ error: 'destination_key must be a valid Stellar public key' });
+    return sendErrorResponse(res, 400, 'destination_key must be a valid Stellar public key');
   }
 
   const { rows: milestones } = await db.query(
@@ -315,17 +320,17 @@ router.post('/:id/submit', requireAuth, async (req, res) => {
      WHERE m.id = $1`,
     [req.params.id]
   );
-  if (!milestones.length) return res.status(404).json({ error: 'Milestone not found' });
+  if (!milestones.length) return sendErrorResponse(res, 404, 'Milestone not found');
   const milestone = milestones[0];
 
   if (milestone.creator_id !== req.user.userId) {
-    return res.status(403).json({ error: 'Only the campaign creator can submit milestone evidence' });
+    return sendErrorResponse(res, 403, 'Only the campaign creator can submit milestone evidence');
   }
   if (!['funded', 'in_progress'].includes(milestone.campaign_status)) {
-    return res.status(409).json({ error: `Milestone submission is not available while campaign status is "${milestone.campaign_status}".` });
+    return sendErrorResponse(res, 409, `Milestone submission is not available while campaign status is "${milestone.campaign_status}".`);
   }
   if (milestone.status === 'released') {
-    return res.status(409).json({ error: 'This milestone has already been released' });
+    return sendErrorResponse(res, 409, 'This milestone has already been released');
   }
 
   const { rows: updated } = await db.query(
@@ -421,12 +426,12 @@ router.post('/:id/submit', requireAuth, async (req, res) => {
  */
 router.post('/:id/reject', requireAuth, async (req, res) => {
   if (!canPerformPlatformSignature(req.user.userId)) {
-    return res.status(403).json({ error: 'Only the designated platform approver can reject milestones' });
+    return sendErrorResponse(res, 403, 'Only the designated platform approver can reject milestones');
   }
 
   const reason = String(req.body?.reason || '').trim();
   if (!reason) {
-    return res.status(400).json({ error: 'reason is required' });
+    return sendErrorResponse(res, 400, 'reason is required');
   }
 
   const { rows } = await db.query(
@@ -438,7 +443,7 @@ router.post('/:id/reject', requireAuth, async (req, res) => {
      RETURNING *`,
     [reason, req.params.id]
   );
-  if (!rows.length) return res.status(404).json({ error: 'Milestone not found or already released' });
+  if (!rows.length) return sendErrorResponse(res, 404, 'Milestone not found or already released');
 
   // Soroban integration: Reject milestone on-chain
   const { rows: campaignRows } = await db.query(
@@ -465,7 +470,7 @@ router.post('/:id/reject', requireAuth, async (req, res) => {
 
 const approveMilestoneReleaseHandler = async (req, res) => {
   if (!canPerformPlatformSignature(req.user.userId)) {
-    return res.status(403).json({ error: 'Only the designated platform approver can approve milestones' });
+    return sendErrorResponse(res, 403, 'Only the designated platform approver can approve milestones');
   }
 
   const reviewNote = String(req.body?.reason || '').trim() || null;
@@ -481,20 +486,20 @@ const approveMilestoneReleaseHandler = async (req, res) => {
      WHERE m.id = $1`,
     [req.params.id]
   );
-  if (!milestoneRows.length) return res.status(404).json({ error: 'Milestone not found' });
+  if (!milestoneRows.length) return sendErrorResponse(res, 404, 'Milestone not found');
   const milestone = milestoneRows[0];
 
   if (!['funded', 'in_progress'].includes(milestone.campaign_status)) {
-    return res.status(409).json({ error: `Milestone approval is not available while campaign status is "${milestone.campaign_status}".` });
+    return sendErrorResponse(res, 409, `Milestone approval is not available while campaign status is "${milestone.campaign_status}".`);
   }
   if (!milestone.evidence_url) {
-    return res.status(409).json({ error: 'Creator must submit milestone evidence before approval' });
+    return sendErrorResponse(res, 409, 'Creator must submit milestone evidence before approval');
   }
   if (!milestone.destination_key || !validatePublicKey(milestone.destination_key)) {
-    return res.status(409).json({ error: 'Creator must provide a valid payout destination before approval' });
+    return sendErrorResponse(res, 409, 'Creator must provide a valid payout destination before approval');
   }
   if (milestone.status === 'released') {
-    return res.status(409).json({ error: 'Milestone already released' });
+    return sendErrorResponse(res, 409, 'Milestone already released');
   }
 
   let releaseAmount;
@@ -527,12 +532,12 @@ const approveMilestoneReleaseHandler = async (req, res) => {
       ));
     } catch (err) {
       if (err.code === '23505') {
-        return res.status(409).json({ error: 'A release is already in progress or recorded for this milestone' });
+        return sendErrorResponse(res, 409, 'A release is already in progress or recorded for this milestone');
       }
       throw err;
     }
     if (!claimRows.length) {
-      return res.status(409).json({ error: 'A release is already in progress or recorded for this milestone' });
+      return sendErrorResponse(res, 409, 'A release is already in progress or recorded for this milestone');
     }
 
     const releaseClaim = async () => {
@@ -552,13 +557,10 @@ const approveMilestoneReleaseHandler = async (req, res) => {
       await releaseClaim();
       if (err instanceof CircuitOpenError) {
         logger.warn('Milestone release build blocked by open circuit breaker', { milestone_id: milestone.id });
-        return res.status(503).json({
-          error: 'Stellar network is temporarily unavailable. Please retry shortly.',
-          retry_after_seconds: err.retryAfterSeconds,
-        });
+        return sendErrorResponse(res, 503, 'Stellar network is temporarily unavailable. Please retry shortly.', undefined, undefined, { retry_after_seconds: err.retryAfterSeconds });
       }
       logger.error('Milestone release transaction build failed', { milestone_id: milestone.id, error: err.message });
-      return res.status(502).json({ error: 'Could not build the milestone release transaction' });
+      return sendErrorResponse(res, 502, 'Could not build the milestone release transaction');
     }
 
     let creatorSignedXdr;
@@ -578,7 +580,7 @@ const approveMilestoneReleaseHandler = async (req, res) => {
     } catch (err) {
       await releaseClaim();
       logger.error('Milestone creator signature failed', { milestone_id: milestone.id, error: err.message });
-      return res.status(503).json({ error: 'Creator signature could not be produced for this milestone release.' });
+      return sendErrorResponse(res, 503, 'Creator signature could not be produced for this milestone release.');
     }
 
     fullySignedXdr = signTransactionXdr({
@@ -588,7 +590,7 @@ const approveMilestoneReleaseHandler = async (req, res) => {
 
     if (signatureCountFromXdr(fullySignedXdr) < 2) {
       await releaseClaim();
-      return res.status(422).json({ error: 'Milestone release requires both creator and platform signatures' });
+      return sendErrorResponse(res, 422, 'Milestone release requires both creator and platform signatures');
     }
 
     try {
@@ -597,17 +599,11 @@ const approveMilestoneReleaseHandler = async (req, res) => {
       await releaseClaim();
       if (err instanceof CircuitOpenError) {
         logger.warn('Milestone release submission blocked by open circuit breaker', { milestone_id: milestone.id });
-        return res.status(503).json({
-          error: 'Stellar network is temporarily unavailable. Please retry shortly.',
-          retry_after_seconds: err.retryAfterSeconds,
-        });
+        return sendErrorResponse(res, 503, 'Stellar network is temporarily unavailable. Please retry shortly.', undefined, undefined, { retry_after_seconds: err.retryAfterSeconds });
       }
       logger.error('Milestone release submission failed', { milestone_id: milestone.id, error: err.message });
       sendAlert('Milestone release submission failed', { milestone_id: milestone.id, error: err.message });
-      return res.status(502).json({
-        error: 'Stellar network rejected the milestone release transaction',
-        detail: err.message || String(err),
-      });
+      return sendErrorResponse(res, 502, 'Stellar network rejected the milestone release transaction', undefined, undefined, { detail: err.message || String(err) });
     }
 
     // Record the on-chain payout immediately so a failed DB commit below can be reconciled.
@@ -635,7 +631,7 @@ const approveMilestoneReleaseHandler = async (req, res) => {
     );
     if (!lockedMilestone.length) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Milestone already released' });
+      return sendErrorResponse(res, 409, 'Milestone already released');
     }
 
     const { rows: existingRelease } = await client.query(
@@ -644,7 +640,7 @@ const approveMilestoneReleaseHandler = async (req, res) => {
     );
     if (existingRelease.length) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'A release has already been recorded for this milestone' });
+      return sendErrorResponse(res, 409, 'A release has already been recorded for this milestone');
     }
 
     let releaseRows;
@@ -668,7 +664,7 @@ const approveMilestoneReleaseHandler = async (req, res) => {
     } catch (err) {
       if (err.code === '23505') {
         await client.query('ROLLBACK');
-        return res.status(409).json({ error: 'A release is already in progress or recorded for this milestone' });
+        return sendErrorResponse(res, 409, 'A release is already in progress or recorded for this milestone');
       }
       throw err;
     }
@@ -726,7 +722,7 @@ const approveMilestoneReleaseHandler = async (req, res) => {
     );
     if (!updatedMilestones.length) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Milestone already released' });
+      return sendErrorResponse(res, 409, 'Milestone already released');
     }
 
     // Soroban integration: Approve milestone on-chain
@@ -780,7 +776,7 @@ const approveMilestoneReleaseHandler = async (req, res) => {
       tx_hash: txHash,
       error: err.message,
     });
-    res.status(500).json({ error: 'Milestone release was submitted but could not be recorded cleanly' });
+    sendErrorResponse(res, 500, 'Milestone release was submitted but could not be recorded cleanly');
   } finally {
     client.release();
   }

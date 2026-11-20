@@ -19,7 +19,7 @@ describe('ToastProvider', () => {
     const { rerender } = render(
       <ToastProvider>
         <Trigger tick={0} />
-      </ToastProvider>,
+      </ToastProvider>
     );
     expect(screen.getByText('Saved')).toBeInTheDocument();
 
@@ -27,7 +27,7 @@ describe('ToastProvider', () => {
     rerender(
       <ToastProvider>
         <Trigger tick={1} />
-      </ToastProvider>,
+      </ToastProvider>
     );
     act(() => vi.advanceTimersByTime(1000));
 

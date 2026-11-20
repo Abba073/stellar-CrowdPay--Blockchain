@@ -155,4 +155,60 @@ describe('Campaign Page', () => {
 
     vi.unstubAllGlobals();
   });
+
+  it('injects campaign meta tags once the campaign loads', async () => {
+    render(
+      <MemoryRouter initialEntries={['/campaigns/1']}>
+        <Routes>
+          <Route path="/campaigns/:id" element={<Campaign />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(document.title).toBe('Community Garden Project | CrowdPay');
+      expect(
+        document.querySelector('meta[property="og:title"]')?.getAttribute('content')
+      ).toBe('Community Garden Project');
+      expect(
+        document.querySelector('meta[name="twitter:title"]')?.getAttribute('content')
+      ).toBe('Community Garden Project');
+      expect(
+        document.querySelector('meta[name="description"]')?.getAttribute('content')
+      ).toBe('Building a sustainable urban garden');
+    });
+  });
+
+  it('resets the title and removes campaign meta tags on unmount', async () => {
+    // Simulate tags injected server-side by nginx SSI before React mounts.
+    const injected = document.createElement('meta');
+    injected.setAttribute('property', 'og:title');
+    injected.setAttribute('content', 'Server injected title');
+    document.head.appendChild(injected);
+
+    const { unmount } = render(
+      <MemoryRouter initialEntries={['/campaigns/1']}>
+        <Routes>
+          <Route path="/campaigns/:id" element={<Campaign />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(
+        document.querySelector('meta[property="og:title"]')?.getAttribute('content')
+      ).toBe('Community Garden Project');
+    });
+
+    unmount();
+
+    expect(document.title).toBe('CrowdPay');
+    expect(document.querySelector('meta[property="og:title"]')).toBeNull();
+    expect(document.querySelector('meta[property="og:description"]')).toBeNull();
+    expect(document.querySelector('meta[property="og:url"]')).toBeNull();
+    expect(document.querySelector('meta[name="twitter:title"]')).toBeNull();
+    expect(document.querySelector('meta[name="twitter:description"]')).toBeNull();
+    expect(document.querySelector('meta[name="twitter:card"]')).toBeNull();
+    expect(document.querySelector('meta[name="description"]')).toBeNull();
+  });
 });

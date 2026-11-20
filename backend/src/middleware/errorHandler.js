@@ -45,28 +45,43 @@ function getErrorCodeForStatus(status) {
 }
 
 /**
- * Helper to send standardized error response
+ * Send the standard error envelope: { error: { code, message, fields? } }.
+ * Every route should use this rather than res.status(...).json({ error }).
+ *
+ * @param {object} [extra] Additional top-level keys kept for existing
+ *   clients (e.g. { retryable: true }); the envelope itself is unchanged.
  */
-function sendErrorResponse(res, status, message, fields = undefined, customCode = undefined) {
+function sendErrorResponse(res, status, message, fields = undefined, customCode = undefined, extra = undefined) {
   const code = customCode || getErrorCodeForStatus(status);
-  res.status(status).json(buildErrorResponse(status, code, message, fields));
+  return res.status(status).json({ ...extra, ...buildErrorResponse(status, code, message, fields) });
 }
 
+/**
+ * Safety net for responses that bypass sendErrorResponse: any 4xx/5xx body
+ * is coerced into the standard envelope, with a code derived from the status.
+ */
 function normalizeErrorResponse(req, res, next) {
   const originalJson = res.json.bind(res);
 
   res.json = function json(body) {
     if (res.statusCode >= 400) {
+      const code = getErrorCodeForStatus(res.statusCode);
       if (body && typeof body.error === 'string') {
-        body = { error: { code: 'ERROR', message: body.error, fields: undefined } };
+        const { error, ...rest } = body;
+        body = { ...rest, error: { code, message: error } };
       } else if (body && body.error && typeof body.error === 'object' && !body.error.code) {
         body = {
           ...body,
           error: {
-            code: 'ERROR',
+            ...body.error,
+            code,
             message: body.error.message || JSON.stringify(body.error),
-            fields: body.error.fields,
           },
+        };
+      } else if (!body || typeof body !== 'object' || !body.error) {
+        body = {
+          ...(body && typeof body === 'object' ? body : {}),
+          error: { code, message: typeof body === 'string' ? body : 'Request failed' },
         };
       }
     }

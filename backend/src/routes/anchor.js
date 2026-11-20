@@ -15,7 +15,16 @@ const {
   getAnchorTransaction,
   isAnchorFailureStatus,
 } = require('../services/anchorService');
-const { parseAmountToStroops, formatStroops } = require('../utils/amounts');
+const { parseAmountToStroops, formatStroops, tryParseAmountToStroops } = require('../utils/amounts');
+
+/** 422 for a malformed or non-positive amount; null when it is valid. */
+function rejectInvalidAmount(res, amount) {
+  const stroops = tryParseAmountToStroops(amount);
+  if (stroops !== null && stroops > 0n) return null;
+  const message = 'amount must be a positive decimal number with at most 7 decimal places';
+  return sendErrorResponse(res, 422, message, { amount: message });
+}
+const { sendErrorResponse } = require('../middleware/errorHandler');
 
 function mapSessionForClient(row) {
   const session = {
@@ -371,30 +380,29 @@ router.get('/info', (_req, res) => {
 router.post('/deposits/start', requireAuth, async (req, res) => {
   const { campaign_id, amount, anchor_id } = req.body || {};
   if (!campaign_id || !amount || !anchor_id) {
-    return res.status(400).json({ error: 'campaign_id, amount and anchor_id are required' });
+    return sendErrorResponse(res, 400, 'campaign_id, amount and anchor_id are required');
   }
+  if (rejectInvalidAmount(res, amount)) return;
 
   const anchor = getAnchorById(anchor_id);
   if (!anchor) {
-    return res.status(404).json({ error: 'Anchor not found' });
+    return sendErrorResponse(res, 404, 'Anchor not found');
   }
   if (!isAnchorConfigured(anchor)) {
-    return res.status(503).json({ error: 'This anchor is not configured for the current backend environment' });
+    return sendErrorResponse(res, 503, 'This anchor is not configured for the current backend environment');
   }
   if (!getSupportedAssetCodes().includes(anchor.assetCode)) {
-    return res.status(409).json({
-      error: `Anchor asset ${anchor.assetCode} is not enabled in CrowdPay's Stellar asset config`,
-    });
+    return sendErrorResponse(res, 409, `Anchor asset ${anchor.assetCode} is not enabled in CrowdPay's Stellar asset config`);
   }
 
   const campaign = await loadCampaignForContribution(campaign_id);
   if (!campaign) {
-    return res.status(404).json({ error: 'Campaign not found or no longer active' });
+    return sendErrorResponse(res, 404, 'Campaign not found or no longer active');
   }
 
   const user = await loadUserWallet(req.user.userId);
   if (!user) {
-    return res.status(404).json({ error: 'User wallet not found' });
+    return sendErrorResponse(res, 404, 'User wallet not found');
   }
 
   try {
@@ -470,9 +478,7 @@ router.post('/deposits/start', requireAuth, async (req, res) => {
         campaign_id,
         user_id: req.user.userId,
       });
-      return res.status(409).json({
-        error: 'A deposit for this campaign is already in progress',
-      });
+      return sendErrorResponse(res, 409, 'A deposit for this campaign is already in progress');
     }
     const status = err.statusCode || 503;
     logger.error('Anchor deposit start failed', {
@@ -481,9 +487,7 @@ router.post('/deposits/start', requireAuth, async (req, res) => {
       user_id: req.user.userId,
       error: err.message,
     });
-    res.status(status).json({
-      error: err.message || 'Could not start the anchor deposit flow right now',
-    });
+    sendErrorResponse(res, status, err.message || 'Could not start the anchor deposit flow right now');
   }
 });
 
@@ -556,20 +560,19 @@ router.get('/sep24/assets', (_req, res) => {
 router.post('/sep24/deposit', requireAuth, async (req, res) => {
   const { amount, anchor_id } = req.body || {};
   if (!amount || !anchor_id) {
-    return res.status(400).json({ error: 'amount and anchor_id are required' });
+    return sendErrorResponse(res, 400, 'amount and anchor_id are required');
   }
+  if (rejectInvalidAmount(res, amount)) return;
 
   const anchor = getAnchorById(anchor_id);
   if (!anchor) {
-    return res.status(404).json({ error: 'Anchor not found' });
+    return sendErrorResponse(res, 404, 'Anchor not found');
   }
   if (!isAnchorConfigured(anchor)) {
-    return res.status(503).json({ error: 'This anchor is not configured for the current backend environment' });
+    return sendErrorResponse(res, 503, 'This anchor is not configured for the current backend environment');
   }
   if (!getSupportedAssetCodes().includes(anchor.assetCode)) {
-    return res.status(409).json({
-      error: `Anchor asset ${anchor.assetCode} is not enabled in CrowdPay's Stellar asset config`,
-    });
+    return sendErrorResponse(res, 409, `Anchor asset ${anchor.assetCode} is not enabled in CrowdPay's Stellar asset config`);
   }
 
   const { rows: userRows } = await db.query(
@@ -577,7 +580,7 @@ router.post('/sep24/deposit', requireAuth, async (req, res) => {
     [req.user.userId]
   );
   if (!userRows.length) {
-    return res.status(404).json({ error: 'User wallet not found' });
+    return sendErrorResponse(res, 404, 'User wallet not found');
   }
   const user = userRows[0];
 
@@ -641,9 +644,7 @@ router.post('/sep24/deposit', requireAuth, async (req, res) => {
         anchor_id,
         user_id: req.user.userId,
       });
-      return res.status(409).json({
-        error: 'A deposit is already in progress',
-      });
+      return sendErrorResponse(res, 409, 'A deposit is already in progress');
     }
     const status = err.statusCode || 503;
     logger.error('SEP-24 wallet deposit start failed', {
@@ -651,9 +652,7 @@ router.post('/sep24/deposit', requireAuth, async (req, res) => {
       user_id: req.user.userId,
       error: err.message,
     });
-    res.status(status).json({
-      error: err.message || 'Could not start the wallet deposit flow right now',
-    });
+    sendErrorResponse(res, status, err.message || 'Could not start the wallet deposit flow right now');
   }
 });
 
@@ -693,10 +692,10 @@ router.get('/deposits/:id', requireAuth, async (req, res) => {
       userId: req.user.userId,
     });
     if (result.notFound) {
-      return res.status(404).json({ error: 'Anchor deposit session not found' });
+      return sendErrorResponse(res, 404, 'Anchor deposit session not found');
     }
     if (result.anchorUnavailable) {
-      return res.status(503).json({ error: 'This anchor is no longer available in the current backend configuration' });
+      return sendErrorResponse(res, 503, 'This anchor is no longer available in the current backend configuration');
     }
     res.json(mapSessionForClient(result.session));
   } catch (err) {
@@ -704,17 +703,13 @@ router.get('/deposits/:id', requireAuth, async (req, res) => {
       logger.warn('Anchor deposit status sync rejected: duplicate active claim', {
         anchor_deposit_id: session.id,
       });
-      return res.status(409).json({
-        error: 'A deposit for this campaign is already in progress',
-      });
+      return sendErrorResponse(res, 409, 'A deposit for this campaign is already in progress');
     }
     logger.error('Anchor deposit status sync failed', {
       anchor_deposit_id: req.params.id,
       error: err.message,
     });
-    res.status(err.statusCode || 502).json({
-      error: err.message || 'Could not refresh anchor transaction status',
-    });
+    sendErrorResponse(res, err.statusCode || 502, err.message || 'Could not refresh anchor transaction status');
   }
 });
 

@@ -1,11 +1,23 @@
 const router = require("express").Router();
 const sanitizeHtml = require("sanitize-html");
 const db = require("../config/database");
+const { NOT_DELETED, findVisibleCampaign } = require("../utils/campaignVisibility");
 const { requireAuth } = require("../middleware/auth");
 const asyncHandler = require("../utils/asyncHandler");
+const {
+  campaignUpdateCreateValidation,
+  campaignUpdateEditValidation,
+  campaignUpdateDeleteValidation,
+  validateRequestUnprocessable,
+} = require("../middleware/requestSchemas");
+const { sendErrorResponse } = require('../middleware/errorHandler');
 
 const MAX_BODY_LENGTH = 20000;
 const MAX_TITLE_LENGTH = 200;
+
+// Per-route JSON limit: a 20,000-character body can be up to ~80 KB as UTF-8.
+// (Was referenced but never defined, so this module failed to load.)
+const updateBodyParser = require("express").json({ limit: "100kb" });
 
 const SANITIZE_OPTIONS = {
   allowedTags: [
@@ -70,25 +82,16 @@ async function requireCampaignCreator(req, res, next) {
   const campaignId = req.params.id;
 
   const { rows } = await db.query(
-    "SELECT id, creator_id FROM campaigns WHERE id = $1",
+    `SELECT id, creator_id FROM campaigns WHERE id = $1 AND ${NOT_DELETED}`,
     [campaignId],
   );
 
   if (!rows.length) {
-    return res.status(404).json({ error: "Campaign not found" });
+    return sendErrorResponse(res, 404, "Campaign not found");
   }
 
   if (rows[0].creator_id !== req.user.userId && req.user.role !== "admin") {
-    // Also allow accepted campaign members with manager role
-    const { rows: memberRows } = await db.query(
-      "SELECT role FROM campaign_members WHERE campaign_id = $1 AND user_id = $2 AND accepted_at IS NOT NULL",
-      [campaignId, req.user.userId],
-    );
-    if (!memberRows.length || memberRows[0].role !== "manager") {
-      return res.status(403).json({
-        error: "Only the campaign creator or a manager can manage updates",
-      });
-    }
+    return sendErrorResponse(res, 403, "Only the campaign creator can manage updates");
   }
 
   req.campaign = rows[0];
@@ -99,6 +102,9 @@ async function requireCampaignCreator(req, res, next) {
 router.get(
   "/:id/updates",
   asyncHandler(async (req, res) => {
+    if (!(await findVisibleCampaign(db, req.params.id))) {
+      return sendErrorResponse(res, 404, "Campaign not found");
+    }
     const { rows } = await db.query(
       `SELECT cu.id,
             cu.campaign_id,
@@ -124,27 +130,25 @@ router.post(
   "/:id/updates",
   requireAuth,
   updateBodyParser,
+  campaignUpdateCreateValidation,
+  validateRequestUnprocessable,
   requireCampaignCreator,
   asyncHandler(async (req, res) => {
     const rawTitle = String(req.body.title ?? "");
     const rawBody = String(req.body.body ?? "");
 
     if (rawBody.length > MAX_BODY_LENGTH) {
-      return res.status(422).json({
-        error: `Body must be at most ${MAX_BODY_LENGTH} characters`,
-      });
+      return sendErrorResponse(res, 422, `Body must be at most ${MAX_BODY_LENGTH} characters`);
     }
     if (rawTitle.length > MAX_TITLE_LENGTH) {
-      return res.status(422).json({
-        error: `Title must be at most ${MAX_TITLE_LENGTH} characters`,
-      });
+      return sendErrorResponse(res, 422, `Title must be at most ${MAX_TITLE_LENGTH} characters`);
     }
 
     const title = sanitizeTitle(rawTitle);
     const body = sanitizeText(rawBody);
 
-    if (!title) return res.status(422).json({ error: "Title is required" });
-    if (!body) return res.status(422).json({ error: "Body is required" });
+    if (!title) return sendErrorResponse(res, 422, "Title is required");
+    if (!body) return sendErrorResponse(res, 422, "Body is required");
 
     const { rows } = await db.query(
       `INSERT INTO campaign_updates (campaign_id, author_id, title, body)
@@ -162,27 +166,25 @@ router.patch(
   "/:id/updates/:updateId",
   requireAuth,
   updateBodyParser,
+  campaignUpdateEditValidation,
+  validateRequestUnprocessable,
   requireCampaignCreator,
   asyncHandler(async (req, res) => {
     const rawTitle = String(req.body.title ?? "");
     const rawBody = String(req.body.body ?? "");
 
     if (rawBody.length > MAX_BODY_LENGTH) {
-      return res.status(422).json({
-        error: `Body must be at most ${MAX_BODY_LENGTH} characters`,
-      });
+      return sendErrorResponse(res, 422, `Body must be at most ${MAX_BODY_LENGTH} characters`);
     }
     if (rawTitle.length > MAX_TITLE_LENGTH) {
-      return res.status(422).json({
-        error: `Title must be at most ${MAX_TITLE_LENGTH} characters`,
-      });
+      return sendErrorResponse(res, 422, `Title must be at most ${MAX_TITLE_LENGTH} characters`);
     }
 
     const title = sanitizeTitle(rawTitle);
     const body = sanitizeText(rawBody);
 
-    if (!title) return res.status(422).json({ error: "Title is required" });
-    if (!body) return res.status(422).json({ error: "Body is required" });
+    if (!title) return sendErrorResponse(res, 422, "Title is required");
+    if (!body) return sendErrorResponse(res, 422, "Body is required");
 
     const { rows } = await db.query(
       `UPDATE campaign_updates
@@ -198,9 +200,7 @@ router.patch(
     );
 
     if (!rows.length) {
-      return res.status(403).json({
-        error: "Update not found or edit window has expired",
-      });
+      return sendErrorResponse(res, 403, "Update not found or edit window has expired");
     }
 
     res.json(withVariants(rows[0]));
@@ -211,6 +211,8 @@ router.patch(
 router.delete(
   "/:id/updates/:updateId",
   requireAuth,
+  campaignUpdateDeleteValidation,
+  validateRequestUnprocessable,
   requireCampaignCreator,
   asyncHandler(async (req, res) => {
     const { rowCount } = await db.query(
@@ -222,7 +224,7 @@ router.delete(
     );
 
     if (!rowCount) {
-      return res.status(404).json({ error: "Update not found" });
+      return sendErrorResponse(res, 404, "Update not found");
     }
 
     res.status(204).send();

@@ -81,7 +81,7 @@ test('banned user is rejected immediately even with a valid token (403)', async 
     .set('Authorization', `Bearer ${token}`);
 
   assert.equal(res.status, 403);
-  assert.match(res.body.error, /suspended/i);
+  assert.match(res.body.error.message, /suspended/i);
 });
 
 test('non-banned user with valid token passes requireAuth (200)', async () => {
@@ -120,7 +120,7 @@ test('role demotion takes effect on next request — stale token role is overwri
 
   // Even though token says 'admin', the DB says 'contributor', so 403
   assert.equal(res.status, 403);
-  assert.match(res.body.error, /Insufficient role/i);
+  assert.match(res.body.error.message, /Insufficient role/i);
 });
 
 test('role promotion takes effect on next request — DB role overrides stale token', async () => {

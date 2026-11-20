@@ -3,6 +3,8 @@ const router = require('express').Router();
 const db = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 const { hashApiKey } = require('../middleware/auth');
+const { apiKeyCreateValidation, validateRequestUnprocessable } = require('../middleware/requestSchemas');
+const { sendErrorResponse } = require('../middleware/errorHandler');
 
 const ALLOWED_SCOPES = new Set(['read', 'write', 'withdrawals', 'developer', 'full']);
 
@@ -89,7 +91,7 @@ router.get('/', requireAuth, async (req, res) => {
  *       401:
  *         description: Missing or invalid authentication
  */
-router.post('/', requireAuth, async (req, res) => {
+router.post('/', requireAuth, apiKeyCreateValidation, validateRequestUnprocessable, async (req, res) => {
   const label = (req.body && req.body.label) || 'API key';
   const scopes = normalizeScopes(req.body && req.body.scopes);
   const rawKey = `cp_live_${crypto.randomBytes(24).toString('hex')}`;
@@ -152,7 +154,7 @@ router.delete('/:id', requireAuth, async (req, res) => {
      RETURNING id`,
     [req.params.id, req.user.userId]
   );
-  if (!rows.length) return res.status(404).json({ error: 'API key not found' });
+  if (!rows.length) return sendErrorResponse(res, 404, 'API key not found');
   res.json({ revoked: true, id: rows[0].id });
 });
 

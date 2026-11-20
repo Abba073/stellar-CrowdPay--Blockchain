@@ -59,6 +59,8 @@ module.exports = [
         btoa: 'readonly',
         atob: 'readonly',
         Image: 'readonly',
+        Event: 'readonly',
+        File: 'readonly',
       },
     },
     plugins: {
@@ -70,7 +72,7 @@ module.exports = [
       'react/no-unescaped-entities': 'off',
       'no-empty': 'off',
       'no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
-      'prettier/prettier': 'off',
+      'prettier/prettier': 'error',
     },
     settings: {
       react: { version: 'detect' },

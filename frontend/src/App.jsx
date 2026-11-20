@@ -28,6 +28,7 @@ export default function App() {
   return (
     <ThemeProvider>
       <AuthProvider>
+        <DialogProvider>
         <ToastProvider>
         <DialogProvider>
         {!hideNavbar && <Navbar />}
@@ -51,6 +52,7 @@ export default function App() {
         </Routes>
         </DialogProvider>
         </ToastProvider>
+        </DialogProvider>
       </AuthProvider>
     </ThemeProvider>
   );

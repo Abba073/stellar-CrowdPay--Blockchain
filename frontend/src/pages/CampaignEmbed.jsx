@@ -28,9 +28,10 @@ export default function CampaignEmbed() {
   const [isLive, setIsLive] = useState(false);
 
   // Extract campaign ID from useParams or URL path fallback: /embed/campaigns/:id
-  const pathParts = typeof window !== 'undefined' && window.location?.pathname
-    ? window.location.pathname.split('/').filter(Boolean)
-    : [];
+  const pathParts =
+    typeof window !== 'undefined' && window.location?.pathname
+      ? window.location.pathname.split('/').filter(Boolean)
+      : [];
   const campaignId = params?.id || pathParts[pathParts.length - 1];
 
   useEffect(() => {
@@ -108,7 +109,9 @@ export default function CampaignEmbed() {
               ...prev,
               raised_amount: newRaised,
               progress_percentage: newPct,
-              backer_count: msg.contribution ? (Number(prev.backer_count) || 0) + 1 : prev.backer_count,
+              backer_count: msg.contribution
+                ? (Number(prev.backer_count) || 0) + 1
+                : prev.backer_count,
             };
           });
         }
@@ -193,25 +196,19 @@ export default function CampaignEmbed() {
   return (
     <div style={styles.container}>
       {isLive && <span style={styles.liveIndicator} title="Live updates active" />}
-      
+
       <h1 style={styles.title}>{campaign.title}</h1>
-      
-      {campaign.description && (
-        <p style={styles.description}>{campaign.description}</p>
-      )}
+
+      {campaign.description && <p style={styles.description}>{campaign.description}</p>}
 
       <div style={styles.progressSection}>
         <div style={styles.amounts}>
           <div>
-            <span style={styles.raisedAmount}>
-              {raisedAmount.toLocaleString()}
-            </span>
+            <span style={styles.raisedAmount}>{raisedAmount.toLocaleString()}</span>
             <span style={styles.asset}>{campaign.asset_type}</span>
             <span style={styles.label}> raised</span>
           </div>
-          <div style={styles.target}>
-            {progressPct.toFixed(1)}%
-          </div>
+          <div style={styles.target}>{progressPct.toFixed(1)}%</div>
         </div>
 
         <div style={styles.progressBar}>

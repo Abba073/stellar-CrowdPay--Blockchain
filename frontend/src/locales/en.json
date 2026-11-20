@@ -23,6 +23,11 @@
     "signUp": "Sign up",
     "yes": "Yes"
   },
+  "dialog": {
+    "confirm": "Confirm",
+    "promptConfirm": "Submit",
+    "ok": "OK"
+  },
   "nav": {
     "startCampaign": "Start Campaign",
     "login": "Log in",
@@ -81,6 +86,29 @@
     "raised": "raised",
     "backers": "{{pct}}% by {{count}} backers",
     "goal": "Goal: {{amount}} {{asset}}"
+  },
+  "forgotPassword": {
+    "title": "Forgot password?",
+    "body": "Enter your email and we'll send you a link to reset your password.",
+    "email": "Email",
+    "send": "Send reset link",
+    "backToLogin": "Log in"
+  },
+  "resetPassword": {
+    "title": "Reset password",
+    "body": "Enter your new password below.",
+    "invalidTitle": "Invalid link",
+    "invalidBody": "This password reset link is invalid or missing a token.",
+    "requestNew": "Request a new link",
+    "newPassword": "New password",
+    "confirmPassword": "Confirm new password",
+    "submit": "Reset password",
+    "success": "Password reset successfully! Redirecting to login...",
+    "errorMismatch": "Passwords do not match",
+    "errorTooShort": "Password must be at least 8 characters long",
+    "errorLowercase": "Password must include a lowercase letter",
+    "errorUppercase": "Password must include an uppercase letter",
+    "errorNumber": "Password must include a number"
   },
   "login": {
     "title": "Log in",
@@ -284,6 +312,9 @@
     "confirmingBody": "Your payment was submitted. We're waiting for it to be confirmed on the Stellar ledger, which usually takes 3-5 seconds.",
     "paymentSubmitted": "Payment submitted",
     "paymentSubmittedBody": "Your contribution is on its way. It usually confirms in a few seconds on Stellar.",
+    "paymentFailed": "Payment failed",
+    "paymentPending": "Confirmation pending",
+    "paymentPendingBody": "We could not confirm whether this transaction reached the Stellar ledger. Check the transaction before trying again.",
     "transaction": "Transaction",
     "conversionSummary": "Conversion summary:",
     "anchorReference": "Anchor reference:",
@@ -303,7 +334,45 @@
     "freighterError": "Freighter payment could not be submitted. Try again.",
     "campaignNotFound": "Campaign not found or no longer active.",
     "amountAssetError": "Check your amount and asset selection.",
-    "conversionFailed": "Conversion failed. Try another amount or asset."
+    "conversionFailed": "Conversion failed. Try another amount or asset.",
+    "limitsTitle": "Limits for this campaign:",
+    "limitMin": "Minimum per contribution: {{amount}} {{asset}}",
+    "limitMax": "Maximum per contribution: {{amount}} {{asset}}",
+    "limitPerUser": "Per-contributor limit: {{amount}} {{asset}}",
+    "limitPerUserRemaining": "Per-contributor limit: {{amount}} {{asset}} (You have contributed {{existing}} {{asset}}; {{remaining}} remaining)",
+    "freighterNetworkMismatch": "Freighter is connected to {{current}}. Switch it to {{expected}} and try again.",
+    "viewOnStellarExpert": "View on Stellar Expert",
+    "viewTransactionOnStellarExpert": "View transaction on Stellar Expert",
+    "submittingWithWallet": "Submitting with CrowdPay wallet\u2026",
+    "connectingFreighter": "Connecting to Freighter\u2026",
+    "preparingTx": "Preparing transaction\u2026",
+    "checkingFreighterNetwork": "Checking Freighter network\u2026",
+    "waitingForSignature": "Waiting for signature\u2026",
+    "submittingSigned": "Submitting signed transaction\u2026",
+    "preparingDeposit": "Preparing deposit flow\u2026",
+    "xlmLabel": "XLM",
+    "xlmHint": "Native Stellar",
+    "usdcLabel": "USDC",
+    "usdcHint": "Stable dollar",
+    "shareText": "I just backed {{title}} on CrowdPay! Join me: {{url}}",
+    "installFreighter": "Install Freighter",
+    "freighterNotDetectedLink": "Freighter extension not detected.",
+    "anchorDepositAsset": "Deposit asset: {{asset}} \u00b7 {{environment}}",
+    "amountCreditedHelp": "This is the credited amount toward the campaign goal, in {{asset}}.",
+    "perUserContributed": "(You have contributed {{existing}} {{asset}}; {{remaining}} remaining)",
+    "aboveMaximumPerUser": "You have already contributed {{existing}} {{asset}}. The per-contributor limit is {{limit}} {{asset}}.",
+    "anchorDepositFailed": "The anchor deposit could not be completed.",
+    "anchorStatusError": "Could not refresh the anchor deposit status.",
+    "freighterNoAccount": "Freighter did not return a Stellar account.",
+    "freighterNoSigned": "Freighter did not return a signed transaction.",
+    "freighterConnectError": "Could not connect to Freighter.",
+    "freighterNetworkReadError": "Could not read Freighter network.",
+    "freighterSignError": "Freighter could not sign this transaction.",
+    "noAnchorAvailable": "No deposit anchor is available right now.",
+    "anchorDepositInfo2": "Anchor deposit.",
+    "plannedContributionDetail": "up to {{maxSend}} {{sendAsset}} will be used so the campaign receives {{campaignAmount}} {{campaignAsset}}.",
+    "conversionSummaryDetail": "up to {{maxSend}} {{sendAsset}} authorized for {{campaignAmount}} {{campaignAsset}} received.",
+    "feeDetail": "{{pct}}% = {{fee}} {{asset}} \u2014 campaign receives {{net}} {{asset}}"
   },
   "status": {
     "goalReached": "Goal reached",
@@ -338,5 +407,24 @@
     "goalReached": "Goal reached",
     "campaignEnded": "Campaign ended",
     "campaignClosed": "Campaign closed"
+  },
+  "transactionStatus": {
+    "indexed": "Indexed",
+    "submitted": "Submitted",
+    "failed": "Failed",
+    "pendingSignatures": "Pending signatures"
+  "categories": {
+    "technology": "Technology",
+    "community": "Community",
+    "arts": "Arts & Culture",
+    "education": "Education",
+    "environment": "Environment",
+    "health": "Health",
+    "business": "Business",
+    "open_source": "Open Source",
+    "other": "Other",
+    "label": "Category",
+    "optional": "(optional)",
+    "selectPlaceholder": "Select a category"
   }
 }

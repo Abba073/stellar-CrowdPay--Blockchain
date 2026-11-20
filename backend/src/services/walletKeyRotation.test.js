@@ -36,6 +36,17 @@ function makeFakeDb() {
       const allowed = new Set([currentKey, ...keysOf(userId)]);
       return { rows: state.contributions.filter((c) => allowed.has(c.sender_public_key)) };
     }
+    if (text.includes('FROM keys')) {
+      // Single-query listUserContributions: current key + every past key.
+      const [userId] = params;
+      const user = state.users[userId];
+      if (!user) return { rows: [{ user_exists: 0, id: null }] };
+      const allowed = new Set([user.wallet_public_key, ...keysOf(userId)]);
+      const rows = state.contributions
+        .filter((c) => allowed.has(c.sender_public_key))
+        .map((c) => ({ user_exists: 1, ...c }));
+      return { rows: rows.length ? rows : [{ user_exists: 1, id: null }] };
+    }
     if (text.includes('FROM contributions c') && text.includes('refund_destination_key')) {
       const rows = state.contributions.map((c) => {
         const k = state.keys.find((x) => x.public_key === c.sender_public_key);

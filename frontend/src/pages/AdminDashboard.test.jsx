@@ -37,8 +37,17 @@ const campaigns = [
 ];
 
 const disputesByCampaign = {
-  c1: [{ id: 'd1', status: 'open', reason: 'Funds not delivered', created_at: '2026-01-01T00:00:00Z' }],
-  c2: [{ id: 'd2', status: 'under_review', reason: 'Misleading pitch', created_at: '2026-03-01T00:00:00Z' }],
+  c1: [
+    { id: 'd1', status: 'open', reason: 'Funds not delivered', created_at: '2026-01-01T00:00:00Z' },
+  ],
+  c2: [
+    {
+      id: 'd2',
+      status: 'under_review',
+      reason: 'Misleading pitch',
+      created_at: '2026-03-01T00:00:00Z',
+    },
+  ],
 };
 
 function renderPage() {
@@ -79,7 +88,9 @@ describe('AdminDashboard dispute queue', () => {
     renderPage();
     const newest = await screen.findByText('Misleading pitch');
     const oldest = screen.getByText('Funds not delivered');
-    expect(newest.compareDocumentPosition(oldest) & window.Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(
+      newest.compareDocumentPosition(oldest) & window.Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
     expect(within(disputeCard('Funds not delivered')).getByText('Solar Roofs')).toBeInTheDocument();
     expect(api.getCampaignDisputes).toHaveBeenCalledWith('c1');
     expect(api.getCampaignDisputes).toHaveBeenCalledWith('c2');
@@ -105,7 +116,9 @@ describe('AdminDashboard dispute queue', () => {
     await screen.findByText('Funds not delivered');
     const card = disputeCard('Funds not delivered');
     expect(within(card).queryByRole('button', { name: '→ open' })).not.toBeInTheDocument();
-    expect(within(card).getByRole('button', { name: '→ resolved_contributor' })).toBeInTheDocument();
+    expect(
+      within(card).getByRole('button', { name: '→ resolved_contributor' })
+    ).toBeInTheDocument();
   });
 
   it('resolves a dispute with the prompted note and updates the card', async () => {
@@ -115,7 +128,9 @@ describe('AdminDashboard dispute queue', () => {
     renderPage();
     await screen.findByText('Funds not delivered');
     await user.click(
-      within(disputeCard('Funds not delivered')).getByRole('button', { name: '→ resolved_contributor' })
+      within(disputeCard('Funds not delivered')).getByRole('button', {
+        name: '→ resolved_contributor',
+      })
     );
     await waitFor(() =>
       expect(api.updateDispute).toHaveBeenCalledWith('d1', {
@@ -136,7 +151,9 @@ describe('AdminDashboard dispute queue', () => {
     const user = userEvent.setup();
     renderPage();
     await screen.findByText('Funds not delivered');
-    await user.click(within(disputeCard('Funds not delivered')).getByRole('button', { name: '→ closed' }));
+    await user.click(
+      within(disputeCard('Funds not delivered')).getByRole('button', { name: '→ closed' })
+    );
     await waitFor(() => expect(dialog.prompt).toHaveBeenCalled());
     expect(api.updateDispute).not.toHaveBeenCalled();
   });
@@ -147,9 +164,14 @@ describe('AdminDashboard dispute queue', () => {
     const user = userEvent.setup();
     renderPage();
     await screen.findByText('Funds not delivered');
-    await user.click(within(disputeCard('Funds not delivered')).getByRole('button', { name: '→ closed' }));
+    await user.click(
+      within(disputeCard('Funds not delivered')).getByRole('button', { name: '→ closed' })
+    );
     await waitFor(() => expect(dialog.alert).toHaveBeenCalledWith('Invalid transition'));
-    expect(api.updateDispute).toHaveBeenCalledWith('d1', { status: 'closed', resolution_note: undefined });
+    expect(api.updateDispute).toHaveBeenCalledWith('d1', {
+      status: 'closed',
+      resolution_note: undefined,
+    });
     expect(within(disputeCard('Funds not delivered')).getByText('open')).toBeInTheDocument();
   });
 });

@@ -6,6 +6,7 @@ const { requireAuth } = require('../middleware/auth');
 const { ALL_WEBHOOK_EVENTS } = require('../services/webhookDispatcher');
 const { extractWebhookResult } = require('../services/kycProvider');
 const { suppressEmail } = require('../services/emailService');
+const { sendErrorResponse } = require('../middleware/errorHandler');
 
 // #280 — Per-route JSON body limit for webhook admin payloads (registration,
 // echo, etc.). Kept tight so oversized payloads fail fast with a 413 instead
@@ -89,7 +90,7 @@ function verifyKycWebhookSignature(req) {
 router.post('/kyc', async (req, res) => {
   // #13 — Reject any request that does not carry a valid HMAC signature.
   if (!verifyKycWebhookSignature(req)) {
-    return res.status(401).json({ error: 'KYC webhook signature verification failed' });
+    return sendErrorResponse(res, 401, 'KYC webhook signature verification failed');
   }
 
   const result = extractWebhookResult(req.body || {});
@@ -97,11 +98,11 @@ router.post('/kyc', async (req, res) => {
   // #13 — Require a provider-issued reference; never fall back to a bare userId
   // supplied by the caller so that an attacker cannot self-verify an arbitrary account.
   if (!result.providerReference) {
-    return res.status(400).json({ error: 'KYC webhook payload missing provider reference' });
+    return sendErrorResponse(res, 400, 'KYC webhook payload missing provider reference');
   }
 
   if (!['verified', 'rejected', 'pending'].includes(result.kycStatus)) {
-    return res.status(400).json({ error: 'Unsupported KYC status' });
+    return sendErrorResponse(res, 400, 'Unsupported KYC status');
   }
 
   // Lookup is strictly by the signed provider reference — never by raw userId.
@@ -116,7 +117,7 @@ router.post('/kyc', async (req, res) => {
   );
 
   if (!rows.length) {
-    return res.status(404).json({ error: 'KYC subject not found' });
+    return sendErrorResponse(res, 404, 'KYC subject not found');
   }
 
   res.json({
@@ -141,7 +142,7 @@ function verifyEmailWebhookToken(req) {
 
 router.post('/email-events', async (req, res) => {
   if (!verifyEmailWebhookToken(req)) {
-    return res.status(401).json({ error: 'Email webhook verification failed' });
+    return sendErrorResponse(res, 401, 'Email webhook verification failed');
   }
 
   const events = Array.isArray(req.body) ? req.body : [req.body?.['event-data'] || req.body || {}];
@@ -172,14 +173,14 @@ router.get('/', requireAuth, async (req, res) => {
 router.post('/', requireAuth, webhookJsonParser, async (req, res) => {
   const { url, events } = req.body || {};
   if (!url || !events) {
-    return res.status(400).json({ error: 'url and events array are required' });
+    return sendErrorResponse(res, 400, 'url and events array are required');
   }
   if (!isValidWebhookUrl(url)) {
-    return res.status(400).json({ error: 'url must be https, or http://localhost for development' });
+    return sendErrorResponse(res, 400, 'url must be https, or http://localhost for development');
   }
   const ev = normalizeEvents(events);
   if (!ev.length) {
-    return res.status(400).json({ error: `events must include at least one of: ${ALL_WEBHOOK_EVENTS.join(', ')}` });
+    return sendErrorResponse(res, 400, `events must include at least one of: ${ALL_WEBHOOK_EVENTS.join(', ')}`);
   }
 
   const secret = `whsec_${crypto.randomBytes(32).toString('hex')}`;
@@ -204,7 +205,7 @@ router.delete('/:id', requireAuth, async (req, res) => {
      RETURNING id`,
     [req.params.id, req.user.userId]
   );
-  if (!rows.length) return res.status(404).json({ error: 'Webhook not found' });
+  if (!rows.length) return sendErrorResponse(res, 404, 'Webhook not found');
   res.json({ revoked: true, id: rows[0].id });
 });
 

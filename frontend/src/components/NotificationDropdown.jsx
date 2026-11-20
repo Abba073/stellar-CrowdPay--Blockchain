@@ -1,9 +1,15 @@
 import React, { useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { api } from '../services/api';
 import RelativeTime from './RelativeTime';
 
-export default function NotificationDropdown({ notifications, onMarkRead, onMarkAllRead, onClose }) {
+export default function NotificationDropdown({
+  notifications,
+  onMarkRead,
+  onMarkAllRead,
+  onClose,
+}) {
   const navigate = useNavigate();
   const menuRef = useRef(null);
 
@@ -48,21 +54,32 @@ export default function NotificationDropdown({ notifications, onMarkRead, onMark
     >
       <div style={styles.header}>
         <span style={styles.headerTitle}>Notifications</span>
-        <button role="menuitem" style={styles.markAll} onClick={onMarkAllRead}>Mark all as read</button>
+        <button role="menuitem" style={styles.markAll} onClick={onMarkAllRead}>
+          Mark all as read
+        </button>
       </div>
       {notifications.length === 0 ? (
-        <div role="none" style={styles.empty}>No notifications yet.</div>
+        <div role="none" style={styles.empty}>
+          No notifications yet.
+        </div>
       ) : (
         notifications.map((n) => (
           <button
             key={n.id}
             role="menuitem"
-            style={{ ...styles.item, background: n.read_at ? 'transparent' : 'var(--color-accent-muted, rgba(99,102,241,0.08))' }}
+            style={{
+              ...styles.item,
+              background: n.read_at
+                ? 'transparent'
+                : 'var(--color-accent-muted, rgba(99,102,241,0.08))',
+            }}
             onClick={() => handleClick(n)}
           >
             <div style={styles.itemTitle}>{n.title}</div>
             {n.body && <div style={styles.itemBody}>{n.body}</div>}
-            <div style={styles.itemTime}><RelativeTime date={n.created_at} /></div>
+            <div style={styles.itemTime}>
+              <RelativeTime date={n.created_at} />
+            </div>
           </button>
         ))
       )}
