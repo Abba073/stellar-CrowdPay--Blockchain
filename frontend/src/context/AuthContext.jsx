@@ -82,6 +82,7 @@ export function AuthProvider({ children }) {
     } catch {}
     setUser(null);
     localStorage.removeItem('cp_user');
+    localStorage.removeItem('cp_token');
     setReady(true);
   }, []);
 
