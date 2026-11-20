@@ -9,6 +9,9 @@ const REQUIRED = [
   'STELLAR_HORIZON_URL',
   'USDC_ISSUER',
 ];
+// config/stellar.js treats anything other than exactly 'mainnet' as testnet,
+// so a typo such as 'MAINNET' would silently sign with the testnet passphrase.
+const STELLAR_NETWORKS = ['testnet', 'mainnet'];
 const STORAGE_VARS = ['STORAGE_BUCKET', 'STORAGE_ENDPOINT'];
 
 const LOG_LEVELS = ['error', 'warn', 'info', 'http', 'verbose', 'debug', 'silly'];
@@ -76,6 +79,13 @@ function validateEnv() {
     process.exit(1);
   }
 
+  if (!STELLAR_NETWORKS.includes(process.env.STELLAR_NETWORK)) {
+    process.stderr.write(
+      `\n[crowdpay] Cannot start: invalid STELLAR_NETWORK "${process.env.STELLAR_NETWORK}". Expected one of: ${STELLAR_NETWORKS.join(', ')} (lowercase).\n\n`
+    );
+    process.exit(1);
+  }
+
   const storageConfigured = STORAGE_VARS.some((key) => !!process.env[key]);
   const storageMissing = STORAGE_VARS.filter((key) => !process.env[key]);
   if (storageConfigured && storageMissing.length) {
@@ -123,6 +133,7 @@ function validateEnv() {
 module.exports = {
   validateEnv,
   REQUIRED,
+  STELLAR_NETWORKS,
   DEV_ONLY_VALUES,
   LOG_LEVELS,
   DEFAULT_LOG_LEVEL,

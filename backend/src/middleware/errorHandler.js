@@ -1,3 +1,4 @@
+const { STATUS_CODES } = require('http');
 const logger = require('../config/logger');
 
 /**
@@ -57,35 +58,114 @@ function sendErrorResponse(res, status, message, fields = undefined, customCode 
 }
 
 /**
+ * Coerce an arbitrary error body into the standard envelope, keeping any
+ * existing top-level keys and a pre-existing error.code untouched.
+ */
+function toErrorEnvelope(status, body) {
+  const code = getErrorCodeForStatus(status);
+  if (body && typeof body === 'object' && typeof body.error === 'string') {
+    const { error, ...rest } = body;
+    return { ...rest, error: { code, message: error } };
+  }
+  if (body && typeof body === 'object' && body.error && typeof body.error === 'object') {
+    if (body.error.code) return body;
+    return {
+      ...body,
+      error: {
+        ...body.error,
+        code,
+        message: body.error.message || JSON.stringify(body.error),
+      },
+    };
+  }
+  return {
+    ...(body && typeof body === 'object' ? body : {}),
+    error: { code, message: typeof body === 'string' && body ? body : 'Request failed' },
+  };
+}
+
+/**
+ * Turn a raw res.send/res.end payload (string, Buffer, undefined) into
+ * something toErrorEnvelope understands, unwrapping JSON text when present.
+ */
+function rawToBody(payload, encoding) {
+  if (payload === undefined || payload === null) return undefined;
+  const text = Buffer.isBuffer(payload)
+    ? payload.toString(typeof encoding === 'string' ? encoding : 'utf8')
+    : String(payload);
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === 'object') return parsed;
+  } catch {
+    // Plain text: use it as the message.
+  }
+  return text;
+}
+
+/**
  * Safety net for responses that bypass sendErrorResponse: any 4xx/5xx body
  * is coerced into the standard envelope, with a code derived from the status.
+ *
+ * Every way of finishing a response is covered (res.json, res.send,
+ * res.sendStatus and res.end), so e.g. res.status(400).send('bad') or
+ * res.sendStatus(404) still produce { error: { code, message } } as JSON.
  */
 function normalizeErrorResponse(req, res, next) {
   const originalJson = res.json.bind(res);
+  const originalSend = res.send.bind(res);
+  const originalEnd = res.end.bind(res);
+
+  // Express implements json -> send -> end internally; only the outermost
+  // call normalizes, the nested ones pass straight through.
+  let depth = 0;
+  const isError = () => res.statusCode >= 400 && !res.headersSent;
+
+  function sendEnvelope(body) {
+    res.set('Content-Type', 'application/json; charset=utf-8');
+    return originalJson(toErrorEnvelope(res.statusCode, body));
+  }
+
+  function guarded(fn) {
+    depth += 1;
+    try {
+      return fn();
+    } finally {
+      depth -= 1;
+    }
+  }
 
   res.json = function json(body) {
-    if (res.statusCode >= 400) {
-      const code = getErrorCodeForStatus(res.statusCode);
-      if (body && typeof body.error === 'string') {
-        const { error, ...rest } = body;
-        body = { ...rest, error: { code, message: error } };
-      } else if (body && body.error && typeof body.error === 'object' && !body.error.code) {
-        body = {
-          ...body,
-          error: {
-            ...body.error,
-            code,
-            message: body.error.message || JSON.stringify(body.error),
-          },
-        };
-      } else if (!body || typeof body !== 'object' || !body.error) {
-        body = {
-          ...(body && typeof body === 'object' ? body : {}),
-          error: { code, message: typeof body === 'string' ? body : 'Request failed' },
-        };
-      }
+    if (depth > 0 || !isError()) return guarded(() => originalJson(body));
+    return guarded(() => sendEnvelope(body));
+  };
+
+  res.send = function send(body) {
+    if (depth > 0 || !isError()) return guarded(() => originalSend(body));
+    const normalized = body && typeof body === 'object' && !Buffer.isBuffer(body)
+      ? body
+      : rawToBody(body);
+    return guarded(() => sendEnvelope(normalized));
+  };
+
+  // sendStatus is built on send, but wrap it explicitly so the behaviour does
+  // not depend on Express internals.
+  res.sendStatus = function sendStatus(statusCode) {
+    res.status(statusCode);
+    return res.send(STATUS_CODES[statusCode] || String(statusCode));
+  };
+
+  res.end = function end(chunk, encoding, cb) {
+    if (depth > 0 || !isError()) return originalEnd(chunk, encoding, cb);
+    if (typeof chunk === 'function') {
+      cb = chunk;
+      chunk = undefined;
+      encoding = undefined;
+    } else if (typeof encoding === 'function') {
+      cb = encoding;
+      encoding = undefined;
     }
-    return originalJson(body);
+    if (typeof cb === 'function') res.once('finish', cb);
+    return guarded(() => sendEnvelope(rawToBody(chunk, encoding)));
   };
 
   next();
@@ -118,6 +198,7 @@ function errorHandler(err, req, res, next) {
 
 module.exports = { 
   normalizeErrorResponse, 
+  toErrorEnvelope, 
   errorHandler, 
   buildErrorResponse, 
   sendErrorResponse,
