@@ -54,6 +54,7 @@ module.exports = [
       'react/react-in-jsx-scope': 'off',  // not needed with React 17+
       'react/prop-types': 'off',          // project doesn't use PropTypes
       'no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
+      'no-duplicate-imports': 'error',    // prevent duplicate module declarations (#412)
       'prettier/prettier': 'warn',
     },
     settings: {
