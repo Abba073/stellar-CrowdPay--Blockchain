@@ -21,7 +21,15 @@ function collapseWhitespace(value) {
   return String(value).replace(/\s+/g, ' ').trim();
 }
 
+function configuredOrigin() {
+  const configured = process.env.CANONICAL_FRONTEND_URL || process.env.FRONTEND_URL;
+  if (!configured) return '';
+  return String(configured).replace(/\/+$/, '');
+}
+
 function requestOrigin(req) {
+  const configured = configuredOrigin();
+  if (configured) return configured;
   const proto = req.get('X-Forwarded-Proto') || req.protocol || 'http';
   const host = req.get('Host');
   return host ? `${proto}://${host}` : '';
@@ -74,7 +82,8 @@ router.get('/head', async (req, res) => {
     return res.type('text/html').send('');
   }
 
-  const cacheKey = `seo:head:${campaignId}`;
+  const origin = requestOrigin(req);
+  const cacheKey = `seo:head:${origin}:${campaignId}`;
   const cached = cache.get(cacheKey);
   if (cached !== undefined) {
     return res.type('text/html').set('Cache-Control', 'public, max-age=60').send(cached);
@@ -96,7 +105,7 @@ router.get('/head', async (req, res) => {
       return res.type('text/html').send('');
     }
 
-    const fragment = renderHead(campaign, requestOrigin(req));
+    const fragment = renderHead(campaign, origin);
     cache.set(cacheKey, fragment, CACHE_TTL_MS);
     return res.type('text/html').set('Cache-Control', 'public, max-age=60').send(fragment);
   } catch (err) {
