@@ -166,6 +166,7 @@ export default function Campaign() {
   const [isLive, setIsLive] = useState(false);
   const [members, setMembers] = useState([]);
   const [isOwner, setIsOwner] = useState(false);
+  const [canManage, setCanManage] = useState(false);
   const [inviteForm, setInviteForm] = useState({ email: "", role: "viewer" });
   const [inviteBusy, setInviteBusy] = useState(false);
   const [inviteError, setInviteError] = useState("");
@@ -212,12 +213,17 @@ export default function Campaign() {
         setCampaign(data);
         if (data.user_role === "owner") {
           setIsOwner(true);
+          setCanManage(true);
           api
             .getCampaignMembers(id)
             .then(setMembers)
             .catch(() => {});
+        } else if (data.user_role === "manager") {
+          setCanManage(true);
+          setIsOwner(false);
         } else {
           setIsOwner(false);
+          setCanManage(false);
         }
       })
       .catch((err) => setLoadError(err.message || "Could not load campaign."));
@@ -694,7 +700,7 @@ export default function Campaign() {
     100,
     (campaign.raised_amount / campaign.target_amount) * 100,
   ).toFixed(1);
-  const canPostUpdate = isCampaignOwner(user, campaign);
+  const canPostUpdate = canManage;
   const campaignUrl = `${window.location.origin}/campaigns/${id}`;
   const embedCode = `<iframe src="${window.location.origin}/embed/campaigns/${id}" width="480" height="280" frameborder="0" title="CrowdPay campaign"></iframe>`;
 
@@ -846,7 +852,7 @@ export default function Campaign() {
       )}
       {campaign.status === "failed" &&
         user &&
-        isCampaignOwner(user, campaign) && (
+        canManage && (
           <div
             style={{
               background: "var(--color-bg-card, #1e1e2f)",
@@ -1151,7 +1157,7 @@ export default function Campaign() {
       </div>
 
       {/* Edit campaign button - visible only to creator */}
-      {isCampaignOwner(user, campaign) && ['active', 'funded'].includes(campaign.status) && (
+      {canManage && ['active', 'funded'].includes(campaign.status) && (
         <div
           data-no-print
           style={{
@@ -1235,7 +1241,7 @@ export default function Campaign() {
       {/* Report a problem — visible to contributors who have backed this campaign */}
       {user &&
         contributions?.some((c) => c.sender_public_key) &&
-        !isCampaignOwner(user, campaign) && (
+        !canManage && (
           <div style={{ marginBottom: "1.25rem" }} data-no-print>
             {disputeSubmitted ? (
               <p className="alert alert--success" role="status">
@@ -1285,7 +1291,7 @@ export default function Campaign() {
 
       <TransactionHistory
         campaignId={campaign.id}
-        isCreator={isCampaignOwner(user, campaign)}
+        isCreator={canManage}
       />
 
       <MilestoneTracker

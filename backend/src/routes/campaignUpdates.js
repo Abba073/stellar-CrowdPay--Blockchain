@@ -79,9 +79,16 @@ async function requireCampaignCreator(req, res, next) {
   }
 
   if (rows[0].creator_id !== req.user.userId && req.user.role !== "admin") {
-    return res.status(403).json({
-      error: "Only the campaign creator can manage updates",
-    });
+    // Also allow accepted campaign members with manager role
+    const { rows: memberRows } = await db.query(
+      "SELECT role FROM campaign_members WHERE campaign_id = $1 AND user_id = $2 AND accepted_at IS NOT NULL",
+      [campaignId, req.user.userId],
+    );
+    if (!memberRows.length || memberRows[0].role !== "manager") {
+      return res.status(403).json({
+        error: "Only the campaign creator or a manager can manage updates",
+      });
+    }
   }
 
   req.campaign = rows[0];
