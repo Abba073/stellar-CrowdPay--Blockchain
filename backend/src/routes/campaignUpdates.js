@@ -161,7 +161,7 @@ router.post(
   }),
 );
 
-// Creator only: edit update within 24 hours
+// Creator or admin: edit update within 24 hours
 router.patch(
   "/:id/updates/:updateId",
   requireAuth,
@@ -186,6 +186,8 @@ router.patch(
     if (!title) return sendErrorResponse(res, 422, "Title is required");
     if (!body) return sendErrorResponse(res, 422, "Body is required");
 
+    const isAdmin = req.user.role === "admin";
+
     const { rows } = await db.query(
       `UPDATE campaign_updates
        SET title = $1,
@@ -193,10 +195,10 @@ router.patch(
            updated_at = NOW()
        WHERE id = $3
          AND campaign_id = $4
-         AND author_id = $5
+         AND ($5::boolean OR author_id = $6)
          AND created_at >= NOW() - INTERVAL '24 hours'
        RETURNING id, campaign_id, author_id, title, body, created_at, updated_at`,
-      [title, body, req.params.updateId, req.params.id, req.user.userId],
+      [title, body, req.params.updateId, req.params.id, isAdmin, req.user.userId],
     );
 
     if (!rows.length) {
@@ -207,7 +209,7 @@ router.patch(
   }),
 );
 
-// Creator only: delete update
+// Creator or admin: delete update
 router.delete(
   "/:id/updates/:updateId",
   requireAuth,
@@ -215,12 +217,14 @@ router.delete(
   validateRequestUnprocessable,
   requireCampaignCreator,
   asyncHandler(async (req, res) => {
+    const isAdmin = req.user.role === "admin";
+
     const { rowCount } = await db.query(
       `DELETE FROM campaign_updates
        WHERE id = $1
          AND campaign_id = $2
-         AND author_id = $3`,
-      [req.params.updateId, req.params.id, req.user.userId],
+         AND ($3::boolean OR author_id = $4)`,
+      [req.params.updateId, req.params.id, isAdmin, req.user.userId],
     );
 
     if (!rowCount) {
