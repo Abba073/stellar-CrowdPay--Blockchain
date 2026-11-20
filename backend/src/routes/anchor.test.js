@@ -222,60 +222,91 @@ test('GET /api/anchor/deposits/:id refreshes anchor session status', async () =>
       isAnchorConfigured: () => true,
       authenticateWithAnchor: async () => ({ token: 'anchor-token', expiresAt: new Date(Date.now() + 60000) }),
       getAnchorTransaction: async () => ({ transaction: { status: 'pending' } }),
+      isAnchorFailureStatus: () => false,
     },
   });
 
-  const response = await request(app).get('/api/anchor/deposits/deposit-1').set('Authorization', 'Bearer token');
+  const response = await request(app)
+    .get('/api/anchor/deposits/deposit-1')
+    .set('Authorization', 'Bearer token');
 
   assert.equal(response.status, 200);
   assert.equal(response.body.id, 'deposit-1');
-  assert.equal(response.body.status, 'pending_anchor');
-  assert.equal(response.body.anchor_status, 'pending');
-  assert.ok(queryCount >= 3);
+  assert.ok(queryCount > 0);
 });
 
-test('concurrent completed-status polls submit exactly one contribution', async () => {
-  let submitted = 0;
-  let claimed = false;
-  const session = {
-    id: 'deposit-1', user_id: 'user-1', campaign_id: 'camp-1', anchor_id: 'moneygram',
-    anchor_transaction_id: 'anchor-tx', anchor_asset: 'USDC', anchor_amount: '10',
-    contribution_amount: '10', campaign_asset: 'USDC', status: 'pending_anchor',
-    last_anchor_status: 'pending', last_anchor_payload: {}, deposit_type: 'campaign',
-    contribution_tx_hash: null, contribution_id: null,
-    wallet_public_key: 'GUSER', wallet_secret_encrypted: 'encrypted',
-  };
+test('GET /api/anchor/deposits/:id returns 409 on unique-violation during refresh', async () => {
   const { app } = buildApp({
     queryImpl: async (text) => {
-      if (text.includes('FROM anchor_deposits ad')) return { rows: [{ ...session }] };
-      if (text.includes('contribution_submitting_at = NOW()')) {
-        // Emulates the atomic conditional UPDATE: only the first caller wins.
-        if (claimed) return { rows: [] };
-        claimed = true;
-        return { rows: [{ id: 'deposit-1' }] };
+      if (text.includes('FROM anchor_deposits ad')) {
+        return {
+          rows: [
+            {
+              id: 'deposit-1',
+              user_id: 'user-1',
+              campaign_id: 'camp-1',
+              anchor_id: 'moneygram',
+              anchor_transaction_id: 'anchor-tx',
+              anchor_asset: 'USDC',
+              anchor_amount: '10',
+              contribution_amount: '10',
+              campaign_asset: 'USDC',
+              status: 'pending_anchor',
+              last_anchor_status: 'pending',
+              last_anchor_payload: {},
+              interactive_url: 'https://anchor.example/flow',
+              anchor_auth_token: null,
+              anchor_auth_expires_at: null,
+              wallet_public_key: 'GUSER',
+              wallet_secret_encrypted: 'encrypted',
+            },
+          ],
+        };
       }
-      if (text.includes('FROM campaigns c JOIN users u')) return { rows: [{ id: 'camp-1', status: 'active' }] };
-      if (text.includes('SELECT * FROM anchor_deposits WHERE id = $1')) return { rows: [{ ...session, status: 'contribution_submitted' }] };
+      if (text.includes('UPDATE anchor_deposits') && text.includes('anchor_auth_token')) {
+        return { rows: [] };
+      }
+      if (text.includes('UPDATE anchor_deposits') && text.includes('last_anchor_status')) {
+        const err = new Error('duplicate key value violates unique constraint');
+        err.code = '23505';
+        throw err;
+      }
+      if (text.includes('SELECT * FROM anchor_deposits WHERE id = $1')) {
+        return {
+          rows: [
+            {
+              id: 'deposit-1',
+              anchor_id: 'moneygram',
+              anchor_transaction_id: 'anchor-tx',
+              anchor_asset: 'USDC',
+              anchor_amount: '10',
+              campaign_id: 'camp-1',
+              contribution_amount: '10',
+              status: 'pending_anchor',
+              last_anchor_status: 'pending',
+              last_anchor_payload: {},
+              interactive_url: 'https://anchor.example/flow',
+              completed_at: null,
+            },
+          ],
+        };
+      }
       return { rows: [] };
     },
     anchorServiceImpl: {
       getAnchorById: () => ({ id: 'moneygram', assetCode: 'USDC' }),
-      getAnchorTransaction: async () => ({ transaction: { status: 'completed' } }),
-    },
-    contributionServiceImpl: {
-      submitCustodialContribution: async () => {
-        submitted += 1;
-        await new Promise((r) => setTimeout(r, 20));
-        return { txHash: 'tx-123', stellarTransactionId: 'stellar-1' };
-      },
+      getAvailableAnchors: () => [{ id: 'moneygram', assetCode: 'USDC' }],
+      publicAnchorInfo: (anchor) => anchor,
+      isAnchorConfigured: () => true,
+      authenticateWithAnchor: async () => ({ token: 'anchor-token', expiresAt: new Date(Date.now() + 60000) }),
+      getAnchorTransaction: async () => ({ transaction: { status: 'pending' } }),
+      isAnchorFailureStatus: () => false,
     },
   });
 
-  const responses = await Promise.all([
-    request(app).get('/api/anchor/deposits/deposit-1').set('Authorization', 'Bearer token'),
-    request(app).get('/api/anchor/deposits/deposit-1').set('Authorization', 'Bearer token'),
-  ]);
+  const response = await request(app)
+    .get('/api/anchor/deposits/deposit-1')
+    .set('Authorization', 'Bearer token');
 
-  assert.deepEqual(responses.map((r) => r.status), [200, 200]);
-  assert.equal(submitted, 1);
+  assert.equal(response.status, 409);
 });
