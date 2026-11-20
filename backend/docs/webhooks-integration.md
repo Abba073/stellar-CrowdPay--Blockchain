@@ -20,23 +20,55 @@ Deliveries are attempted immediately and, on failure, retried **up to 5 times** 
 - **Headers:**
   - `Content-Type: application/json`
   - `X-CrowdPay-Event`: event name (e.g. `contribution.received`)
-  - `X-CrowdPay-Delivery-Id`: unique delivery UUID (for idempotency on your side)
-  - `X-CrowdPay-Signature`: `sha256=<hex>` where `<hex>` is **HMAC-SHA256** of the **raw request body bytes** using your endpoint’s **webhook secret** (shown once when the endpoint is created).
+  - `X-CrowdPay-Timestamp`: Unix epoch **seconds** at which the delivery was signed. Reject deliveries whose timestamp is more than **5 minutes** away from your current clock (in either direction).
+  - `X-CrowdPay-Delivery-Id`: unique delivery UUID. It is stable across retries of the same delivery — use it for idempotency (store processed ids and ignore duplicates).
+  - `X-CrowdPay-Signature`: `sha256=<hex>` where `<hex>` is **HMAC-SHA256** of the string `` `${timestamp}.${rawBody}` `` (the `X-CrowdPay-Timestamp` value, a literal `.`, then the **raw request body bytes**) using your endpoint’s **webhook secret** (shown once when the endpoint is created).
+
+## Replay protection
+
+Every delivery is signed together with its timestamp, so a captured request cannot be replayed indefinitely:
+
+1. **Check the timestamp.** Parse `X-CrowdPay-Timestamp` as epoch seconds and reject the delivery if it is more than 5 minutes in the past or future.
+2. **Verify the HMAC.** Recompute the signature over `` `${timestamp}.${rawBody}` `` and compare it in constant time. Because the timestamp is part of the signed payload, an attacker cannot alter it to bypass step 1.
+3. **Deduplicate by delivery id.** Keep a record of processed `X-CrowdPay-Delivery-Id` values (e.g. for at least 24 hours) and ignore any delivery you have already handled. Retries of the same delivery reuse the same id.
 
 ## Verifying the signature (Node.js)
 
 ```javascript
 const crypto = require('crypto');
 
-function verifyCrowdPayWebhook(rawBodyBuffer, signatureHeader, secret) {
+const MAX_SKEW_SECONDS = 5 * 60;
+
+function verifyCrowdPayWebhook(rawBodyBuffer, headers, secret, seenDeliveryIds) {
+  const timestamp = headers['x-crowdpay-timestamp'];
+  const signatureHeader = headers['x-crowdpay-signature'];
+  const deliveryId = headers['x-crowdpay-delivery-id'];
+
+  // 1. Timestamp freshness (±5 minutes).
+  const ts = Number(timestamp);
+  if (!Number.isInteger(ts)) return false;
+  if (Math.abs(Math.floor(Date.now() / 1000) - ts) > MAX_SKEW_SECONDS) return false;
+
+  // 2. HMAC over `${timestamp}.${rawBody}`.
   const match = /^sha256=(.+)$/.exec(signatureHeader || '');
   if (!match) return false;
-  const expected = crypto.createHmac('sha256', secret).update(rawBodyBuffer).digest('hex');
-  return crypto.timingSafeEqual(Buffer.from(match[1], 'hex'), Buffer.from(expected, 'hex'));
+  const signedPayload = Buffer.concat([
+    Buffer.from(`${timestamp}.`, 'utf8'),
+    rawBodyBuffer,
+  ]);
+  const expected = crypto.createHmac('sha256', secret).update(signedPayload).digest('hex');
+  const provided = Buffer.from(match[1], 'hex');
+  if (provided.length !== expected.length / 2) return false;
+  if (!crypto.timingSafeEqual(provided, Buffer.from(expected, 'hex'))) return false;
+
+  // 3. Idempotency by delivery id.
+  if (!deliveryId || seenDeliveryIds.has(deliveryId)) return false;
+  seenDeliveryIds.add(deliveryId);
+  return true;
 }
 ```
 
-Use the **raw** body string (before JSON parsing) so the signature matches what CrowdPay signed.
+Use the **raw** body string (before JSON parsing) so the signature matches what CrowdPay signed, and always verify in the order above: timestamp → HMAC → delivery-id deduplication.
 
 ## API keys (server-to-server)
 

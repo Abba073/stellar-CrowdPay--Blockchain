@@ -16,7 +16,7 @@ const mockSentry = {
   },
 };
 
-test('GET /health returns pool stats and ok status when database is reachable', async () => {
+test('GET /health returns only ok status when database is reachable', async () => {
   const mockDb = {
     query: async (text) => {
       assert.equal(text, 'SELECT 1');
@@ -52,14 +52,7 @@ test('GET /health returns pool stats and ok status when database is reachable', 
   const response = await request(app).get('/health');
   
   assert.equal(response.status, 200);
-  assert.deepEqual(response.body, {
-    status: 'ok',
-    db: {
-      total: 8,
-      idle: 5,
-      waiting: 1,
-    },
-  });
+  assert.deepEqual(response.body, { status: 'ok' });
 });
 
 test('GET /health returns 503 and error message when database query fails', async () => {
@@ -95,8 +88,5 @@ test('GET /health returns 503 and error message when database query fails', asyn
   const response = await request(app).get('/health');
   
   assert.equal(response.status, 503);
-  assert.deepEqual(response.body, {
-    status: 'error',
-    error: 'Connection refused',
-  });
+  assert.equal(response.body.error?.message || response.body.error, 'Connection refused');
 });

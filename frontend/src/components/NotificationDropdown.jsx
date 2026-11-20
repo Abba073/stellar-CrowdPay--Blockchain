@@ -1,10 +1,38 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { api } from '../services/api';
 import RelativeTime from './RelativeTime';
 
-export default function NotificationDropdown({ notifications, onMarkRead, onMarkAllRead, onClose }) {
+export default function NotificationDropdown({
+  notifications,
+  onMarkRead,
+  onMarkAllRead,
+  onClose,
+}) {
   const navigate = useNavigate();
+  const menuRef = useRef(null);
+
+  const items = () => [...menuRef.current.querySelectorAll('[role="menuitem"]')];
+
+  useEffect(() => {
+    items()[0]?.focus();
+  }, []);
+
+  function handleKeyDown(e) {
+    const list = items();
+    const i = list.indexOf(document.activeElement);
+    let next;
+    if (e.key === 'ArrowDown') next = list[(i + 1) % list.length];
+    else if (e.key === 'ArrowUp') next = list[(i - 1 + list.length) % list.length];
+    else if (e.key === 'Home') next = list[0];
+    else if (e.key === 'End') next = list[list.length - 1];
+    else if (e.key === 'Tab') onClose();
+    if (next) {
+      e.preventDefault();
+      next.focus();
+    }
+  }
 
   async function handleClick(notif) {
     onClose();
@@ -16,23 +44,42 @@ export default function NotificationDropdown({ notifications, onMarkRead, onMark
   }
 
   return (
-    <div style={styles.dropdown}>
+    <div
+      id="notification-menu"
+      role="menu"
+      aria-label="Notifications"
+      ref={menuRef}
+      onKeyDown={handleKeyDown}
+      style={styles.dropdown}
+    >
       <div style={styles.header}>
         <span style={styles.headerTitle}>Notifications</span>
-        <button style={styles.markAll} onClick={onMarkAllRead}>Mark all as read</button>
+        <button role="menuitem" style={styles.markAll} onClick={onMarkAllRead}>
+          Mark all as read
+        </button>
       </div>
       {notifications.length === 0 ? (
-        <div style={styles.empty}>No notifications yet.</div>
+        <div role="none" style={styles.empty}>
+          No notifications yet.
+        </div>
       ) : (
         notifications.map((n) => (
           <button
             key={n.id}
-            style={{ ...styles.item, background: n.read_at ? 'transparent' : 'var(--color-accent-muted, rgba(99,102,241,0.08))' }}
+            role="menuitem"
+            style={{
+              ...styles.item,
+              background: n.read_at
+                ? 'transparent'
+                : 'var(--color-accent-muted, rgba(99,102,241,0.08))',
+            }}
             onClick={() => handleClick(n)}
           >
             <div style={styles.itemTitle}>{n.title}</div>
             {n.body && <div style={styles.itemBody}>{n.body}</div>}
-            <div style={styles.itemTime}><RelativeTime date={n.created_at} /></div>
+            <div style={styles.itemTime}>
+              <RelativeTime date={n.created_at} />
+            </div>
           </button>
         ))
       )}

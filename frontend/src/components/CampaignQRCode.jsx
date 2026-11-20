@@ -15,10 +15,11 @@ export default function CampaignQRCode({ url, size = 180 }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem' }}>
-      <canvas ref={canvasRef} />
+      <canvas ref={canvasRef} role="img" aria-label={`QR code for ${url}`} />
       <a
         href={url}
         download="campaign-qr.png"
+        aria-label="Download QR code image"
         onClick={(e) => {
           e.preventDefault();
           const link = document.createElement('a');

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { api } from '../services/api';
@@ -11,29 +11,16 @@ import {
   dismissContributorOnboarding,
   consumeJustRegistered,
 } from '../lib/onboarding';
+import { CATEGORY_KEYS } from '../lib/categories';
 
 const STATUS_OPTIONS = ['', 'active', 'funded', 'closed', 'failed'];
 const ASSET_OPTIONS = ['', 'USDC', 'XLM'];
 const SORT_OPTIONS = [
   { value: 'newest', key: 'home.newest' },
+  { value: 'trending', key: 'home.trending' },
   { value: 'most_funded', key: 'home.mostFunded' },
   { value: 'closest_to_goal', key: 'home.closestToGoal' },
-  { value: 'newest', label: 'Newest' },
-  { value: 'trending', label: 'Trending' },
-  { value: 'funded', label: 'Most funded' },
-  { value: 'closest_to_goal', label: 'Closest to goal' },
 ];
-const CATEGORY_LABELS = {
-  technology: 'Technology',
-  community: 'Community',
-  arts: 'Arts & Culture',
-  education: 'Education',
-  environment: 'Environment',
-  health: 'Health',
-  business: 'Business',
-  open_source: 'Open Source',
-  other: 'Other',
-};
 const SEARCH_DEBOUNCE_MS = 450;
 
 export default function Home() {
@@ -46,6 +33,7 @@ export default function Home() {
   const [hasMore, setHasMore] = useState(true);
   const [listError, setListError] = useState('');
   const { user } = useAuth();
+  const location = useLocation();
   const [showContributorTips, setShowContributorTips] = useState(isContributorOnboardingVisible);
   const [welcomeNewUser, setWelcomeNewUser] = useState(false);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -72,14 +60,24 @@ export default function Home() {
   const category = searchParams.get('category') || '';
 
   const hasActiveFilters =
-    Boolean(search.trim()) || Boolean(asset) || Boolean(status) || Boolean(category) || sort !== 'newest';
+    Boolean(search.trim()) ||
+    Boolean(asset) ||
+    Boolean(status) ||
+    Boolean(category) ||
+    sort !== 'newest';
 
   useEffect(() => {
     if (consumeJustRegistered()) {
       setWelcomeNewUser(true);
     }
-    api.getCampaignCategories().then(setCategoryCounts).catch(() => {});
-    api.getFeaturedCampaigns().then(setFeatured).catch(() => {});
+    api
+      .getCampaignCategories()
+      .then(setCategoryCounts)
+      .catch(() => {});
+    api
+      .getFeaturedCampaigns()
+      .then(setFeatured)
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -94,12 +92,18 @@ export default function Home() {
     return () => clearTimeout(timer);
   }, [searchInput, search]);
 
+  const requestIdRef = useRef(0);
+
   useEffect(() => {
+    const requestId = ++requestIdRef.current;
+    const isStale = () => requestId !== requestIdRef.current;
     setListError('');
     setLoading(true);
+    setLoadingMore(false);
     api
       .getCampaigns({ search, status, asset, category, sort, limit: 20, offset: 0 })
       .then((data) => {
+        if (isStale()) return;
         const nextCampaigns = data.campaigns || [];
         const nextTotal = data.total || 0;
         setCampaigns(nextCampaigns);
@@ -107,12 +111,21 @@ export default function Home() {
         setHasMore(nextCampaigns.length < nextTotal);
         setPage(1);
       })
-      .catch((err) => setListError(err.message || t('home.loadingCampaigns')))
-      .finally(() => setLoading(false));
+      .catch((err) => {
+        if (!isStale()) setListError(err.message || t('home.loadingCampaigns'));
+      })
+      .finally(() => {
+        if (!isStale()) setLoading(false);
+      });
+    return () => {
+      requestIdRef.current += 1;
+    };
   }, [search, status, asset, category, sort]);
 
   async function loadMore() {
     if (loadingMore || !hasMore) return;
+    const requestId = requestIdRef.current;
+    const isStale = () => requestId !== requestIdRef.current;
     setLoadingMore(true);
     setListError('');
     try {
@@ -125,6 +138,7 @@ export default function Home() {
         limit: 20,
         offset: page * 20,
       });
+      if (isStale()) return;
       setCampaigns((prev) => {
         const updated = [...prev, ...next];
         setHasMore(updated.length < nextTotal);
@@ -133,9 +147,9 @@ export default function Home() {
       setTotal(nextTotal);
       setPage((p) => p + 1);
     } catch (err) {
-      setListError(err.message || t('home.loadingCampaigns'));
+      if (!isStale()) setListError(err.message || t('home.loadingCampaigns'));
     } finally {
-      setLoadingMore(false);
+      if (!isStale()) setLoadingMore(false);
     }
   }
 
@@ -197,7 +211,11 @@ export default function Home() {
           <div className="hero-actions">
             {(user.role === 'creator' || user.role === 'admin') && (
               <Link to="/campaigns/new" style={{ width: '100%' }}>
-                <button type="button" className="btn-primary" style={{ fontSize: '1rem', padding: '0.75rem 1.5rem', width: '100%' }}>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  style={{ fontSize: '1rem', padding: '0.75rem 1.5rem', width: '100%' }}
+                >
                   {t('home.startCampaign')}
                 </button>
               </Link>
@@ -207,11 +225,19 @@ export default function Home() {
         ) : (
           <div className="hero-actions hero-actions--row-sm">
             <Link to="/register" style={{ flex: '1 1 140px', minWidth: '140px' }}>
-              <button type="button" className="btn-primary" style={{ fontSize: '1rem', padding: '0.75rem 1.5rem', width: '100%' }}>
+              <button
+                type="button"
+                className="btn-primary"
+                style={{ fontSize: '1rem', padding: '0.75rem 1.5rem', width: '100%' }}
+              >
                 {t('home.createAccount')}
               </button>
             </Link>
-            <Link to="/login" style={{ flex: '1 1 140px', minWidth: '140px' }}>
+            <Link
+              to="/login"
+              state={{ from: location.pathname + location.search }}
+              style={{ flex: '1 1 140px', minWidth: '140px' }}
+            >
               <button type="button" className="btn-secondary" style={{ fontSize: '1rem', padding: '0.75rem 1.5rem', width: '100%' }}>
                 {t('login.title')}
               </button>
@@ -223,7 +249,12 @@ export default function Home() {
       {featured.length > 0 && (
         <section style={{ marginBottom: '2.5rem' }}>
           <h2 style={styles.sectionTitle}>⭐️ Featured campaigns</h2>
-          <div style={{ ...styles.grid, gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 340px), 1fr))' }}>
+          <div
+            style={{
+              ...styles.grid,
+              gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 340px), 1fr))',
+            }}
+          >
             {featured.map((c) => (
               <CampaignCard key={c.id} campaign={c} featured />
             ))}
@@ -251,7 +282,9 @@ export default function Home() {
           >
             {STATUS_OPTIONS.map((option) => (
               <option key={option} value={option}>
-                {option === '' ? t('home.anyStatus') : t(`home.status${option[0].toUpperCase()}${option.slice(1)}`)}
+                {option === ''
+                  ? t('home.anyStatus')
+                  : t(`home.status${option[0].toUpperCase()}${option.slice(1)}`)}
               </option>
             ))}
           </select>
@@ -299,36 +332,35 @@ export default function Home() {
           <button
             key={cat.category}
             type="button"
-            style={category === cat.category ? { ...styles.pill, ...styles.pillActive } : styles.pill}
+            style={
+              category === cat.category ? { ...styles.pill, ...styles.pillActive } : styles.pill
+            }
             onClick={() => setFilters({ category: cat.category })}
           >
-            {CATEGORY_LABELS[cat.category] || cat.category} ({cat.count})
+            {CATEGORY_KEYS.includes(cat.category) ? t(`categories.${cat.category}`) : cat.category}{' '}
+            ({cat.count})
           </button>
         ))}
       </div>
 
-      <h2 style={styles.sectionTitle}>Active campaigns</h2>
-
       <div style={styles.sortBar}>
-        {[
-          { value: 'newest',   label: 'Newest' },
-          { value: 'trending', label: '🔥 Trending' },
-          { value: 'funded',   label: 'Most funded' },
-        ].map((opt) => (
+        {SORT_OPTIONS.map((opt) => (
           <button
             key={opt.value}
             type="button"
             className={sort === opt.value ? 'pill-active' : 'pill'}
             onClick={() => handleSortChange(opt.value)}
           >
-            {opt.label}
+            {t(opt.key)}
           </button>
         ))}
       </div>
 
       {loading ? (
         <div style={styles.grid}>
-          {Array.from({ length: 6 }, (_, i) => <CampaignCardSkeleton key={i} />)}
+          {Array.from({ length: 6 }, (_, i) => (
+            <CampaignCardSkeleton key={i} />
+          ))}
         </div>
       ) : listError ? (
         <p className="alert alert--error" role="alert">
@@ -360,7 +392,10 @@ export default function Home() {
           ) : user && (user.role === 'creator' || user.role === 'admin') ? (
             <>
               {t('home.noCampaigns')}{' '}
-              <Link to="/campaigns/new" style={{ color: 'var(--color-info-text)', fontWeight: 700 }}>
+              <Link
+                to="/campaigns/new"
+                style={{ color: 'var(--color-info-text)', fontWeight: 700 }}
+              >
                 {t('home.startCampaign')}
               </Link>
               .
@@ -402,7 +437,12 @@ export default function Home() {
 
 const styles = {
   hero: { textAlign: 'center', padding: '2rem 0 2.5rem' },
-  h1: { fontSize: 'clamp(1.85rem, 5vw, 2.85rem)', fontWeight: 800, marginBottom: '1rem', color: 'var(--color-text-primary)' },
+  h1: {
+    fontSize: 'clamp(1.85rem, 5vw, 2.85rem)',
+    fontWeight: 800,
+    marginBottom: '1rem',
+    color: 'var(--color-text-primary)',
+  },
   sub: {
     fontSize: 'clamp(0.95rem, 2.5vw, 1.1rem)',
     color: 'var(--color-text-secondary)',
@@ -411,8 +451,19 @@ const styles = {
     margin: '0 auto 1.5rem',
     lineHeight: 1.55,
   },
-  muted: { fontSize: '0.85rem', color: 'var(--color-text-hint)', maxWidth: '320px', lineHeight: 1.4, textAlign: 'center' },
-  sectionTitle: { fontSize: '1.2rem', fontWeight: 700, marginBottom: '1.1rem', color: 'var(--color-text-primary)' },
+  muted: {
+    fontSize: '0.85rem',
+    color: 'var(--color-text-hint)',
+    maxWidth: '320px',
+    lineHeight: 1.4,
+    textAlign: 'center',
+  },
+  sectionTitle: {
+    fontSize: '1.2rem',
+    fontWeight: 700,
+    marginBottom: '1.1rem',
+    color: 'var(--color-text-primary)',
+  },
   sortBar: {
     display: 'flex',
     gap: '0.5rem',
@@ -425,11 +476,39 @@ const styles = {
     gap: '1rem',
     marginBottom: '1.25rem',
   },
-  filterItem: { display: 'flex', flexDirection: 'column', gap: '0.35rem', fontSize: '0.9rem', color: 'var(--color-text-primary)' },
-  filterInput: { width: '100%', padding: '0.75rem', borderRadius: '8px', border: '1px solid var(--color-border)', fontSize: '0.95rem' },
-  grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 300px), 1fr))', gap: '1.25rem' },
-  pagination: { marginTop: '1.25rem', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1rem' },
+  filterItem: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.35rem',
+    fontSize: '0.9rem',
+    color: 'var(--color-text-primary)',
+  },
+  filterInput: {
+    width: '100%',
+    padding: '0.75rem',
+    borderRadius: '8px',
+    border: '1px solid var(--color-border)',
+    fontSize: '0.95rem',
+  },
+  grid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 300px), 1fr))',
+    gap: '1.25rem',
+  },
+  pagination: {
+    marginTop: '1.25rem',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '1rem',
+  },
   paginationInfo: { color: 'var(--color-text-secondary)', fontSize: '0.95rem' },
   loadMoreContainer: { display: 'flex', justifyContent: 'center', width: '100%' },
-  loadMoreButton: { padding: '0.75rem 2rem', fontSize: '1.05rem', cursor: 'pointer', borderRadius: '8px', border: '1px solid var(--color-border)' },
+  loadMoreButton: {
+    padding: '0.75rem 2rem',
+    fontSize: '1.05rem',
+    cursor: 'pointer',
+    borderRadius: '8px',
+    border: '1px solid var(--color-border)',
+  },
 };

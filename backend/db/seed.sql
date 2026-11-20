@@ -4,11 +4,13 @@
 --   bola@example.com / creator123
 --   admin@example.com / admin123
 --
--- Wallet secrets below are placeholders for UI/demo data only. Use the register flow for
--- fully functional custodial wallets tied to the active encryption provider.
+-- Seeded users are UI-only demo accounts: they are stored as non-custodial ('freighter')
+-- wallets with a NULL wallet_secret_encrypted, so no raw or fake secret material is ever
+-- written. Use the register flow for fully functional custodial wallets tied to the active
+-- encryption provider.
 
 -- Insert mock users
-INSERT INTO users (id, email, password_hash, name, wallet_public_key, wallet_secret_encrypted, role, is_admin)
+INSERT INTO users (id, email, password_hash, name, wallet_public_key, wallet_secret_encrypted, wallet_type, role, is_admin)
 VALUES
   (
     '00000000-0000-0000-0000-000000000001',
@@ -16,7 +18,8 @@ VALUES
     '$2a$10$DYk4gRzRYFWDKHrrhNGDDu0KeggnjTpaDAIG7aHYtGR58aalFs0aK',
     'Alice Okafor',
     'GBFQZXA6Q4M7BMSNL6Q5M6P47TQIJM47KQKAR5R6XWQ7QX4PX5A7K5TJ',
-    'seed-placeholder-alice',
+    NULL,
+    'freighter',
     'contributor',
     FALSE
   ),
@@ -26,7 +29,8 @@ VALUES
     '$2a$10$g2uWQBvPXQWUD/q2xG5/IOk1h3R.ss8iV5vH7nPU5o7Rf0LPNK.X2',
     'Bola Adeyemi',
     'GC3FJ5M7SXXGVC7YZB5RZUGQ4VOVZL7O2TGTQBS5A7VJ6E4SL4P5NH4G',
-    'seed-placeholder-bola',
+    NULL,
+    'freighter',
     'creator',
     FALSE
   ),
@@ -36,7 +40,8 @@ VALUES
     '$2a$10$1ll7LPNKN1xfnGQXUipCJe3kGwnZXHCvO3PlZusyaVPf7g8t4E/u6',
     'CrowdPay Admin',
     'GAVS7U42Q4V6KN3PJ7Q7S5FA2LMQ7EJ34O6Y3X6JYB4N4XJXPNPS7JH2',
-    'seed-placeholder-admin',
+    NULL,
+    'freighter',
     'admin',
     TRUE
   )
@@ -44,6 +49,8 @@ ON CONFLICT (email) DO UPDATE
 SET
   password_hash = EXCLUDED.password_hash,
   name = EXCLUDED.name,
+  wallet_secret_encrypted = EXCLUDED.wallet_secret_encrypted,
+  wallet_type = EXCLUDED.wallet_type,
   role = EXCLUDED.role,
   is_admin = EXCLUDED.is_admin;
 

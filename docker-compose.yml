@@ -3,17 +3,18 @@ version: '3.9'
 services:
   db:
     image: postgres:14-alpine
+    user: postgres
     environment:
-      POSTGRES_DB: crowdpay
-      POSTGRES_USER: crowdpay
-      POSTGRES_PASSWORD: crowdpay
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
     volumes:
       - ./backend/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U crowdpay"]
+      test: ["CMD-SHELL", "pg_isready -U \"$POSTGRES_USER\""]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -24,21 +25,39 @@ services:
       db:
         condition: service_healthy
     env_file: ./backend/.env
+    environment:
+      # backend/.env points at localhost for manual runs; inside compose the DB is `db`.
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
     ports:
       - "3001:3001"
     volumes:
       - ./backend:/app
       - /app/node_modules
     command: npm run dev
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   frontend:
     build: ./frontend
+    depends_on:
+      backend:
+        condition: service_healthy
     ports:
       - "5173:5173"
     volumes:
       - ./frontend:/app
       - /app/node_modules
     command: npm run dev -- --host
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5173/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
 volumes:
   pgdata:

@@ -10,7 +10,8 @@
     "format": "prettier --write src/",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "format:check": "prettier --check src/"
   },
   "dependencies": {
     "@sentry/react": "^10.55.0",

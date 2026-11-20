@@ -39,4 +39,72 @@ module.exports = {
 
   /** Initial reconnect delay for the ledger payment stream, in milliseconds. */
   LEDGER_MONITOR_RECONNECT_DELAY_MS: 5_000,
+
+  // ---------------------------------------------------------------------------
+  // Canonical status values (single source of truth)
+  //
+  // These arrays MUST stay in sync with the CHECK constraints / enum-like
+  // columns in the database schema. Schema-integrity tests import them to
+  // assert parity, so adding a new status here is the first step of any
+  // status-related migration.
+  // ---------------------------------------------------------------------------
+
+  /** Campaign lifecycle statuses (campaigns.status). */
+  CAMPAIGN_STATUSES: Object.freeze([
+    'draft',
+    'active',
+    'funded',
+    'in_progress',
+    'completed',
+    'failed',
+    'suspended',
+    'refunded',
+    'cancelled',
+  ]),
+
+  /** Withdrawal request statuses (withdrawals.status). */
+  WITHDRAWAL_STATUSES: Object.freeze([
+    'pending',
+    'approved',
+    'processing',
+    'completed',
+    'failed',
+    'rejected',
+    'cancelled',
+  ]),
+
+  /** Dispute statuses (disputes.status). */
+  DISPUTE_STATUSES: Object.freeze([
+    'open',
+    'under_review',
+    'resolved',
+    'rejected',
+    'closed',
+  ]),
+
+  /** Milestone statuses (milestones.status). */
+  MILESTONE_STATUSES: Object.freeze([
+    'pending',
+    'in_progress',
+    'submitted',
+    'approved',
+    'rejected',
+    'completed',
+  ]),
+
+  /** Contribution statuses (contributions.status). */
+  CONTRIBUTION_STATUSES: Object.freeze([
+    'pending',
+    'confirmed',
+    'failed',
+    'refunded',
+  ]),
+
+  /** Refund statuses (refunds.status). */
+  REFUND_STATUSES: Object.freeze([
+    'pending',
+    'processing',
+    'completed',
+    'failed',
+  ]),
 };

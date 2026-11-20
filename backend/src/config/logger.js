@@ -46,11 +46,74 @@ const redactSensitiveValues = winston.format((info) => {
   return info;
 });
 
+const DEFAULT_LEVEL = 'info';
+const VALID_LEVELS = Object.keys(winston.config.npm.levels);
+
+function resolveLogLevel(rawLevel) {
+  if (!rawLevel) return DEFAULT_LEVEL;
+  const normalized = String(rawLevel).trim().toLowerCase();
+  if (VALID_LEVELS.includes(normalized)) return normalized;
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[logger] Invalid LOG_LEVEL "${rawLevel}"; falling back to "${DEFAULT_LEVEL}". Valid levels: ${VALID_LEVELS.join(', ')}`
+  );
+  return DEFAULT_LEVEL;
+}
+
+function parseModuleOverrides(rawOverrides) {
+  const overrides = {};
+  if (!rawOverrides) return overrides;
+
+  for (const entry of String(rawOverrides).split(',')) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const separatorIndex = trimmed.indexOf('=');
+    if (separatorIndex === -1) {
+      // eslint-disable-next-line no-console
+      console.warn(`[logger] Ignoring malformed LOG_LEVEL_MODULES entry "${trimmed}" (expected module=level).`);
+      continue;
+    }
+    const moduleName = trimmed.slice(0, separatorIndex).trim();
+    const rawLevel = trimmed.slice(separatorIndex + 1).trim();
+    if (!moduleName) {
+      // eslint-disable-next-line no-console
+      console.warn(`[logger] Ignoring LOG_LEVEL_MODULES entry "${trimmed}" with empty module name.`);
+      continue;
+    }
+    const level = resolveLogLevel(rawLevel);
+    overrides[moduleName] = level;
+  }
+
+  return overrides;
+}
+
+const baseLevel = resolveLogLevel(process.env.LOG_LEVEL);
+const moduleOverrides = parseModuleOverrides(process.env.LOG_LEVEL_MODULES);
+
+// Applies per-module level overrides by dropping records below the configured
+// level for the module that emitted them. Records without a module (or with a
+// module that has no override) are left untouched and use the base level.
+const applyModuleLevelOverrides = winston.format((info) => {
+  const moduleName = info.module || info.moduleName;
+  if (!moduleName || !Object.prototype.hasOwnProperty.call(moduleOverrides, moduleName)) {
+    return info;
+  }
+  const overrideLevel = moduleOverrides[moduleName];
+  if (info.level !== overrideLevel && !winston.config.npm.levels[info.level]) {
+    return info;
+  }
+  const threshold = winston.config.npm.levels[overrideLevel];
+  const current = winston.config.npm.levels[info.level];
+  if (current === undefined) return info;
+  return current <= threshold ? info : false;
+});
+
 const logger = winston.createLogger({
-  level: process.env.LOG_LEVEL || 'info',
+  level: baseLevel,
   format: winston.format.combine(
     addRequestId(),
     redactSensitiveValues(),
+    applyModuleLevelOverrides(),
     winston.format.timestamp(),
     isDev
       ? winston.format.combine(
@@ -65,5 +128,8 @@ const logger = winston.createLogger({
   ),
   transports: [new winston.transports.Console()],
 });
+
+logger.levels = winston.config.npm.levels;
+logger.moduleOverrides = moduleOverrides;
 
 module.exports = logger;

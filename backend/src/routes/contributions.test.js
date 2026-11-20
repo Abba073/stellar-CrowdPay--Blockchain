@@ -208,6 +208,9 @@ function buildApp({ queryImpl, stellarImpl, stellarTxImpl }) {
         req.user = { userId: 'user-1' };
         next();
       },
+      optionalAuth: (req, _res, next) => {
+        next();
+      },
     },
     '../middleware/validation': {
       contributionValidation: [],
@@ -219,6 +222,8 @@ function buildApp({ queryImpl, stellarImpl, stellarTxImpl }) {
   const app = express();
   app.use(express.json());
   app.use('/api/contributions', router);
+  // Same terminal handler as src/index.js, so thrown errors get the envelope.
+  app.use(require('../middleware/errorHandler').errorHandler);
   return app;
 }
 
@@ -482,7 +487,7 @@ test('POST /api/contributions returns 503 when custodial trustline setup fails',
     .send({ campaign_id: '11111111-1111-1111-1111-111111111111', amount: '5.0000000', send_asset: 'XLM' });
 
   assert.equal(response.status, 503);
-  assert.match(response.body.error, /retry/i);
+  assert.match(response.body.error.message, /retry/i);
 });
 
 test('POST /api/contributions returns 502 when Stellar submit fails and skips audit insert', async () => {
@@ -698,7 +703,7 @@ test('POST /api/contributions/submit-signed rejects a signed XDR that does not m
     });
 
   assert.equal(response.status, 422);
-  assert.match(response.body.error, /does not match/i);
+  assert.match(response.body.error.message, /does not match/i);
 });
 
 test('GET /api/contributions/finalization/:txHash returns finalized when indexed', async () => {
@@ -813,7 +818,7 @@ test('POST /api/contributions validates min_contribution limit', async () => {
     .send({ campaign_id: '11111111-1111-1111-1111-111111111111', amount: '10.0000000', send_asset: 'USDC' });
 
   assert.equal(response.status, 400);
-  assert.equal(response.body.error, 'Minimum contribution is 15.0000000 USDC');
+  assert.equal(response.body.error.message, 'Minimum contribution is 15.0000000 USDC');
 });
 
 test('POST /api/contributions validates max_contribution limit', async () => {
@@ -843,7 +848,7 @@ test('POST /api/contributions validates max_contribution limit', async () => {
     .send({ campaign_id: '11111111-1111-1111-1111-111111111111', amount: '60.0000000', send_asset: 'USDC' });
 
   assert.equal(response.status, 400);
-  assert.equal(response.body.error, 'Maximum contribution is 50.0000000 USDC');
+  assert.equal(response.body.error.message, 'Maximum contribution is 50.0000000 USDC');
 });
 
 test('POST /api/contributions validates cumulative max_per_user cap', async () => {
@@ -878,5 +883,159 @@ test('POST /api/contributions validates cumulative max_per_user cap', async () =
     .send({ campaign_id: '11111111-1111-1111-1111-111111111111', amount: '30.0000000', send_asset: 'USDC' });
 
   assert.equal(response.status, 400);
-  assert.equal(response.body.error, 'You have already contributed 80 USDC. The per-contributor limit is 100.0000000.');
+  assert.equal(response.body.error.message, 'You have already contributed 80 USDC. The per-contributor limit is 100.0000000.');
+});
+
+test('POST /api/contributions/prepare and /submit-signed have rate limiting applied', async () => {
+  const router = proxyquire('./contributions', {
+    '../config/database': { query: async () => ({ rows: [] }) },
+    '../services/stellarService': {
+      buildUnsignedContributionPathPayment: async () => ({ unsignedXdr: 'xdr', quote: {} }),
+      signAndSubmitCampaignContribution: async () => ({}),
+      getSupportedAssetCodes: () => ['XLM', 'USDC'],
+    },
+    '../services/stellarTransactionService': {
+      insertContributionSubmitted: async () => 'row-id',
+      updateContributionConfirmed: async () => {},
+    },
+  });
+
+  assert.ok(router.stack.some((layer) => layer.route && layer.route.path === '/prepare'));
+  assert.ok(router.stack.some((layer) => layer.route && layer.route.path === '/submit-signed'));
+});
+
+test('GET /api/contributions/campaign/:id 404s for a soft-deleted campaign (no backer data)', async () => {
+  const app = buildApp({
+    queryImpl: async (text) => {
+      if (/FROM campaigns\b/.test(text)) {
+        return /deleted_at IS NULL/.test(text) ? { rows: [] } : { rows: [{ id: 'c', creator_id: 'x' }] };
+      }
+      return { rows: [{ id: 'k', sender_public_key: 'GPII', total_count: 1 }] };
+    },
+  });
+  const res = await request(app).get('/api/contributions/campaign/3f2b8c1e-1d2a-4b3c-9d4e-5f6a7b8c9d0e');
+  assert.equal(res.status, 404);
+  assert.ok(!JSON.stringify(res.body).includes('GPII'));
+});
+
+// ---- backer wall keyset pagination ------------------------------------------
+
+const WALL_CAMPAIGN = '11111111-1111-1111-1111-111111111111';
+
+function wallRows(n, startMinute = 0) {
+  return Array.from({ length: n }, (_, i) => ({
+    id: `00000000-0000-4000-8000-${String(startMinute + i).padStart(12, '0')}`,
+    sender_public_key: 'GSENDER',
+    amount: '1',
+    asset: 'XLM',
+    created_at: new Date(Date.UTC(2026, 9, 21, 10, 59 - (startMinute + i))).toISOString(),
+    _cursor_value: `2026-10-21 10:${String(59 - (startMinute + i)).padStart(2, '0')}:00.123456+00`,
+  }));
+}
+
+function wallApp(pageRows) {
+  const queries = [];
+  const app = buildApp({
+    queryImpl: async (text, params) => {
+      queries.push({ text, params });
+      if (/FROM campaigns\b/.test(text)) return { rows: [{ id: WALL_CAMPAIGN }] };
+      if (text.includes('COUNT(*)::int AS total FROM contributions')) return { rows: [{ total: 42 }] };
+      if (text.includes('FROM contributions c')) return { rows: pageRows };
+      return { rows: [] };
+    },
+  });
+  return { app, queries };
+}
+
+test('GET /api/contributions/campaign/:id returns a first page with next_cursor and total', async () => {
+  const { app, queries } = wallApp(wallRows(3));
+  const res = await request(app).get(`/api/contributions/campaign/${WALL_CAMPAIGN}?limit=2`);
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.contributions.length, 2);
+  assert.equal(res.body.total, 42);
+  assert.ok(res.body.next_cursor);
+  assert.ok(!('offset' in res.body));
+  assert.ok(!('_cursor_value' in res.body.contributions[0]));
+
+  const page = queries.find((q) => q.text.includes('FROM contributions c'));
+  assert.match(page.text, /ORDER BY c\.created_at DESC, c\.id DESC/);
+  assert.doesNotMatch(page.text, /OFFSET/);
+  assert.deepEqual(page.params, [WALL_CAMPAIGN, 3], 'fetches limit + 1 to detect more pages');
+});
+
+test('GET /api/contributions/campaign/:id continues from a cursor with a keyset filter and no count', async () => {
+  const first = wallApp(wallRows(3));
+  const cursor = (await request(first.app).get(`/api/contributions/campaign/${WALL_CAMPAIGN}?limit=2`)).body.next_cursor;
+
+  const { app, queries } = wallApp(wallRows(1, 2));
+  const res = await request(app).get(`/api/contributions/campaign/${WALL_CAMPAIGN}?limit=2&cursor=${cursor}`);
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.next_cursor, null, 'last page');
+  assert.ok(!('total' in res.body));
+  assert.ok(!queries.some((q) => q.text.includes('COUNT(*)')));
+  const page = queries.find((q) => q.text.includes('FROM contributions c'));
+  assert.match(page.text, /\(c\.created_at, c\.id\) < \(\$2::timestamptz, \$3::uuid\)/);
+  assert.deepEqual(page.params, [
+    WALL_CAMPAIGN,
+    '2026-10-21 10:58:00.123456+00',
+    '00000000-0000-4000-8000-000000000001',
+    3,
+  ]);
+});
+
+test('GET /api/contributions/campaign/:id keeps legacy ?offset paging', async () => {
+  const { app, queries } = wallApp(wallRows(2));
+  const res = await request(app).get(`/api/contributions/campaign/${WALL_CAMPAIGN}?limit=2&offset=40`);
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.offset, 40);
+  assert.equal(res.body.next_cursor, null);
+  const page = queries.find((q) => q.text.includes('FROM contributions c'));
+  assert.match(page.text, /OFFSET \$3/);
+  assert.deepEqual(page.params, [WALL_CAMPAIGN, 2, 40]);
+});
+
+test('GET /api/contributions/campaign/:id rejects a malformed cursor with 400', async () => {
+  const { app } = wallApp([]);
+  const res = await request(app).get(`/api/contributions/campaign/${WALL_CAMPAIGN}?cursor=not-a-cursor`);
+  assert.equal(res.status, 400);
+  assert.equal(res.body.error.code, 'INVALID_CURSOR');
+});
+
+// ---- malformed amounts are client errors, not 500s ---------------------------
+
+test('malformed contribution amounts answer 422 VALIDATION_ERROR with a field message', async () => {
+  const app = buildApp({
+    queryImpl: async () => {
+      throw new Error('DB must not be reached for a malformed amount');
+    },
+  });
+
+  for (const [path, body] of [
+    ['/api/contributions', { campaign_id: WALL_CAMPAIGN, amount: 'abc', send_asset: 'XLM' }],
+    ['/api/contributions', { campaign_id: WALL_CAMPAIGN, amount: '1e5', send_asset: 'XLM' }],
+    ['/api/contributions/prepare', { campaign_id: WALL_CAMPAIGN, amount: '-3', send_asset: 'XLM', sender_public_key: 'G' }],
+  ]) {
+    const res = await request(app).post(path).set('Authorization', 'Bearer token').send(body);
+    assert.equal(res.status, 422, `${path} ${body.amount}`);
+    assert.equal(res.body.error.code, 'VALIDATION_ERROR');
+    assert.ok(res.body.error.fields.amount);
+  }
+});
+
+test('a malformed quote dest_amount answers 422, not 500', async () => {
+  const app = buildApp({
+    queryImpl: async () => ({ rows: [{ id: WALL_CAMPAIGN, asset_type: 'USDC', status: 'active', wallet_public_key: 'GDEST' }] }),
+    stellarImpl: {
+      getPathPaymentQuote: async () => [{ source_amount: '1', source_asset: 'XLM', path: [] }],
+    },
+  });
+  const res = await request(app)
+    .get(`/api/contributions/quote?campaign_id=${WALL_CAMPAIGN}&send_asset=XLM&dest_asset=USDC&dest_amount=1e5`)
+    .set('Authorization', 'Bearer token');
+  assert.equal(res.status, 422);
+  assert.equal(res.body.error.code, 'VALIDATION_ERROR');
+  assert.ok(res.body.error.fields.dest_amount);
 });
