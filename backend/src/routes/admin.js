@@ -498,12 +498,27 @@ router.patch('/users/:id/unban', adminJsonParser, async (req, res) => {
 router.get('/audit-log', async (req, res) => {
   try {
     const { limit = 100, offset = 0, before_id: beforeId } = req.query;
-    const limitNum = Math.min(parseInt(limit) || 100, 100);
-    const offsetNum = beforeId ? 0 : parseInt(offset) || 0;
+    const isNonNegativeInteger = (value) =>
+      /^\d+$/.test(String(value)) && Number.isSafeInteger(Number(value));
 
-    if (beforeId && !/^[0-9a-f-]{36}$/i.test(beforeId)) {
+    if (!isNonNegativeInteger(limit) || Number(limit) < 1) {
+      return sendErrorResponse(res, 400, 'limit must be a positive integer');
+    }
+
+    if (!isNonNegativeInteger(offset)) {
+      return sendErrorResponse(res, 400, 'offset must be a non-negative integer');
+    }
+
+    const hasBeforeId = req.query.before_id !== undefined;
+    if (hasBeforeId && (
+      typeof beforeId !== 'string' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(beforeId)
+    )) {
       return sendErrorResponse(res, 400, 'before_id must be a UUID');
     }
+
+    const limitNum = Math.min(Number(limit), 100);
+    const offsetNum = hasBeforeId ? 0 : Number(offset);
 
     // Keyset pagination: pass the last row's id as before_id to fetch the next page.
     const { rows } = await db.query(
@@ -561,7 +576,7 @@ router.patch('/users/:id/promote', requireSuperAdmin, adminJsonParser, async (re
     }
 
     const { rows: updated } = await db.query(
-      `UPDATE users SET is_admin = true WHERE id = $1 RETURNING id, email, is_admin`,
+      `UPDATE users SET is_admin = true, role = 'admin' WHERE id = $1 RETURNING id, email, is_admin, role`,
       [id]
     );
 
@@ -615,7 +630,7 @@ router.patch('/users/:id/demote', requireSuperAdmin, adminJsonParser, async (req
     }
 
     const { rows: updated } = await db.query(
-      `UPDATE users SET is_admin = false WHERE id = $1 RETURNING id, email, is_admin`,
+      `UPDATE users SET is_admin = false, role = 'contributor' WHERE id = $1 RETURNING id, email, is_admin, role`,
       [id]
     );
 

@@ -69,6 +69,102 @@ test('normalizeErrorResponse coerces legacy shapes into the envelope with a stat
   assert.equal(typeof b.body.error.message, 'string');
 });
 
+test('normalizeErrorResponse coerces res.send with a string or Buffer body', async () => {
+  const app = buildApp((a) => {
+    a.get('/text', (req, res) => res.status(400).send('bad'));
+    a.get('/buffer', (req, res) => res.status(502).send(Buffer.from('upstream down')));
+    a.get('/json-text', (req, res) =>
+      res.status(409).type('json').send(JSON.stringify({ error: 'Duplicate', id: 7 }))
+    );
+    a.get('/object', (req, res) => res.status(403).send({ error: 'Nope' }));
+  });
+
+  const text = await request(app).get('/text');
+  assert.equal(text.status, 400);
+  assert.match(text.headers['content-type'], /application\/json/);
+  assert.deepEqual(text.body, { error: { code: 'BAD_REQUEST', message: 'bad' } });
+
+  const buf = await request(app).get('/buffer');
+  assert.equal(buf.status, 502);
+  assert.deepEqual(buf.body, { error: { code: 'BAD_GATEWAY', message: 'upstream down' } });
+
+  const jsonText = await request(app).get('/json-text');
+  assert.deepEqual(jsonText.body, { id: 7, error: { code: 'CONFLICT', message: 'Duplicate' } });
+
+  const obj = await request(app).get('/object');
+  assert.deepEqual(obj.body, { error: { code: 'FORBIDDEN', message: 'Nope' } });
+});
+
+test('normalizeErrorResponse coerces res.sendStatus', async () => {
+  const app = buildApp((a) => {
+    a.get('/404', (req, res) => res.sendStatus(404));
+    a.get('/503', (req, res) => res.sendStatus(503));
+  });
+
+  const notFound = await request(app).get('/404');
+  assert.equal(notFound.status, 404);
+  assert.match(notFound.headers['content-type'], /application\/json/);
+  assert.deepEqual(notFound.body, { error: { code: 'NOT_FOUND', message: 'Not Found' } });
+
+  const unavailable = await request(app).get('/503');
+  assert.equal(unavailable.status, 503);
+  assert.deepEqual(unavailable.body, {
+    error: { code: 'SERVICE_UNAVAILABLE', message: 'Service Unavailable' },
+  });
+});
+
+test('normalizeErrorResponse coerces res.end with and without a chunk', async () => {
+  let callbackCalled = false;
+  const app = buildApp((a) => {
+    a.get('/empty', (req, res) => res.status(401).end());
+    a.get('/chunk', (req, res) => res.status(500).end('boom', 'utf8'));
+    a.get('/callback', (req, res) => {
+      res.status(429).end(() => {
+        callbackCalled = true;
+      });
+    });
+  });
+
+  const empty = await request(app).get('/empty');
+  assert.equal(empty.status, 401);
+  assert.match(empty.headers['content-type'], /application\/json/);
+  assert.deepEqual(empty.body, { error: { code: 'UNAUTHORIZED', message: 'Request failed' } });
+
+  const chunk = await request(app).get('/chunk');
+  assert.equal(chunk.status, 500);
+  assert.deepEqual(chunk.body, { error: { code: 'INTERNAL_ERROR', message: 'boom' } });
+
+  const cb = await request(app).get('/callback');
+  assert.equal(cb.status, 429);
+  assert.deepEqual(cb.body, { error: { code: 'TOO_MANY_REQUESTS', message: 'Request failed' } });
+  assert.equal(callbackCalled, true);
+});
+
+test('normalizeErrorResponse leaves successful and already-enveloped responses untouched', async () => {
+  const app = buildApp((a) => {
+    a.get('/ok-text', (req, res) => res.send('hello'));
+    a.get('/ok-status', (req, res) => res.sendStatus(204));
+    a.get('/ok-end', (req, res) => res.status(200).end('raw'));
+    a.get('/coded', (req, res) =>
+      res.status(422).send({ error: { code: 'CUSTOM', message: 'kept', fields: { a: 'b' } } })
+    );
+  });
+
+  const okText = await request(app).get('/ok-text');
+  assert.equal(okText.status, 200);
+  assert.match(okText.headers['content-type'], /text\/html/);
+  assert.equal(okText.text, 'hello');
+
+  const okStatus = await request(app).get('/ok-status');
+  assert.equal(okStatus.status, 204);
+
+  const okEnd = await request(app).get('/ok-end');
+  assert.equal(okEnd.text, 'raw');
+
+  const coded = await request(app).get('/coded');
+  assert.deepEqual(coded.body, { error: { code: 'CUSTOM', message: 'kept', fields: { a: 'b' } } });
+});
+
 test('errorHandler sends the envelope for thrown errors', async () => {
   const app = buildApp((a) => {
     a.get('/boom', () => {

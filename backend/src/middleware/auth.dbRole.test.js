@@ -26,8 +26,8 @@ const JWT_SECRET = 'test-secret-for-issue-18';
  * @param {object} opts.dbUser - row returned by `SELECT role, is_admin, is_super_admin, is_banned`
  * @param {string[]} [opts.roles] - if provided, wrap route in requireRole(...roles)
  */
-function buildApp({ dbUser, roles }) {
-  const { requireAuth, requireRole } = proxyquire('./auth', {
+function buildApp({ dbUser, roles, adminAccess = false }) {
+  const { requireAuth, requireAdmin, requireRole } = proxyquire('./auth', {
     '../config/database': {
       query: async (text, params) => {
         if (text.includes('FROM users')) {
@@ -43,8 +43,12 @@ function buildApp({ dbUser, roles }) {
 
   const app = express();
   app.use(express.json());
+  app.use(require('cookie-parser')());
 
   const middlewares = [requireAuth];
+  if (adminAccess) {
+    middlewares.push(requireAdmin);
+  }
   if (roles && roles.length) {
     middlewares.push(requireRole(...roles));
   }
@@ -157,4 +161,56 @@ test('DB role is returned in response — token role is not used', async () => {
   assert.equal(res.status, 200);
   // Must return 'creator' (DB value), NOT 'contributor' (token value)
   assert.equal(res.body.role, 'creator');
+});
+
+test('Bearer token takes precedence over a stale access-token cookie', async () => {
+  process.env.JWT_SECRET = JWT_SECRET;
+
+  const token = mintToken({ userId: 'user-good', role: 'contributor' });
+  const app = buildApp({
+    dbUser: { role: 'contributor', is_admin: false, is_super_admin: false, is_banned: false },
+  });
+
+  const res = await request(app)
+    .get('/protected')
+    .set('Cookie', 'cp_token=stale-cookie-token')
+    .set('Authorization', `Bearer ${token}`);
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.userId, 'user-good');
+});
+
+test('promoted admin fields satisfy both admin middleware checks', async () => {
+  process.env.JWT_SECRET = JWT_SECRET;
+
+  const token = mintToken({ userId: 'user-promoted', role: 'contributor' });
+  const app = buildApp({
+    dbUser: { role: 'admin', is_admin: true, is_super_admin: false, is_banned: false },
+    adminAccess: true,
+    roles: ['admin'],
+  });
+
+  const res = await request(app)
+    .get('/protected')
+    .set('Authorization', `Bearer ${token}`);
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.role, 'admin');
+});
+
+test('demoted admin fields are rejected by requireAdmin', async () => {
+  process.env.JWT_SECRET = JWT_SECRET;
+
+  const token = mintToken({ userId: 'user-demoted', role: 'admin' });
+  const app = buildApp({
+    dbUser: { role: 'contributor', is_admin: false, is_super_admin: false, is_banned: false },
+    adminAccess: true,
+  });
+
+  const res = await request(app)
+    .get('/protected')
+    .set('Authorization', `Bearer ${token}`);
+
+  assert.equal(res.status, 403);
+  assert.match(res.body.error.message, /admin privileges/i);
 });

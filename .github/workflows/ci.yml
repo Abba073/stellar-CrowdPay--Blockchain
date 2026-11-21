@@ -117,6 +117,22 @@ jobs:
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -1 -f db/seed.sql
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -1 -f db/seed.sql
 
+      - name: Bootstrap from schema.sql + seed.sql only (no migrations)
+        working-directory: ./backend
+        env:
+          PGPASSWORD: password
+        run: |
+          psql -h localhost -p 5432 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "DROP DATABASE IF EXISTS crowdpay_bootstrap;"
+          psql -h localhost -p 5432 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE DATABASE crowdpay_bootstrap;"
+          psql -h localhost -p 5432 -U postgres -d crowdpay_bootstrap -v ON_ERROR_STOP=1 \
+            -f db/schema.sql
+          psql -h localhost -p 5432 -U postgres -d crowdpay_bootstrap -v ON_ERROR_STOP=1 \
+            -1 -f db/seed.sql
+          psql -h localhost -p 5432 -U postgres -d crowdpay_bootstrap -v ON_ERROR_STOP=1 \
+            -c "SELECT count(*) FROM users;"
+
       - name: Schema integrity and integration tests
         working-directory: ./backend
         run: npm run test:db

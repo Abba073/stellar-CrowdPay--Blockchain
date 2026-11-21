@@ -463,7 +463,7 @@ test('GET /api/campaigns/:id returns the caller contributed total for the per-us
   const token = jwt.sign({ userId: 'user-1' }, process.env.JWT_SECRET || 'test-secret-for-unit-tests');
   const app = buildApp({
     queryImpl: async (text) => {
-      if (text.includes('SELECT *,') ) {
+      if (text.includes('SELECT *,')) {
         return {
           rows: [
             {
@@ -523,7 +523,6 @@ test('POST /api/campaigns/:id/refresh-status allows authorized creator or admin'
   assert.equal(response.status, 200);
   assert.equal(refreshCalled, true, 'Authorized POST should refresh campaign status');
 });
-
 
 // ---------------------------------------------------------------------------
 // Issue #20: Campaign invite acceptance must be bound to invited email

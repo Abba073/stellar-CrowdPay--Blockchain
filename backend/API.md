@@ -118,7 +118,7 @@ Deprecated aliases still respond but will be removed; new integrations must use 
 | `POST` | `/api/campaigns/cron/reminders` | Admin | Manual trigger for deadline reminders |
 | `GET` | `/api/campaigns/:id/milestones` | Public | |
 | `POST` | `/api/campaigns/:id/milestones` | Owner | Replace the milestone plan |
-| `GET` | `/api/campaigns/:id/updates` | Public | `limit`, `offset` query params |
+| `GET` | `/api/campaigns/:id/updates` | Public | `limit` (1-100, default 20), `offset` (default 0); returns `{ updates, limit, offset }` |
 | `POST` | `/api/campaigns/:id/updates` | Owner | Campaign creator only |
 | `PATCH` | `/api/campaigns/:id/updates/:updateId` | Owner | Campaign creator only |
 | `DELETE` | `/api/campaigns/:id/updates/:updateId` | Owner | Campaign creator only |

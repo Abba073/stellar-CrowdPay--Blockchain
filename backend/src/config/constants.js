@@ -91,20 +91,4 @@ module.exports = {
     'rejected',
     'completed',
   ]),
-
-  /** Contribution statuses (contributions.status). */
-  CONTRIBUTION_STATUSES: Object.freeze([
-    'pending',
-    'confirmed',
-    'failed',
-    'refunded',
-  ]),
-
-  /** Refund statuses (refunds.status). */
-  REFUND_STATUSES: Object.freeze([
-    'pending',
-    'processing',
-    'completed',
-    'failed',
-  ]),
 };

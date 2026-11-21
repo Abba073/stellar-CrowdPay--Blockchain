@@ -178,7 +178,7 @@ async function validateRefreshToken(token) {
     const res = await db.query(
       `SELECT rt.id AS token_id, rt.user_id, rt.family_id, rt.revoked_at, rt.expires_at, rt.token_version AS rt_token_version,
               u.id AS id, u.email, u.name, u.role, u.wallet_public_key, u.wallet_type,
-              u.kyc_status, u.kyc_completed_at, u.token_version
+              u.kyc_status, u.kyc_completed_at, u.token_version, u.is_banned
        FROM refresh_tokens rt
        JOIN users u ON u.id = rt.user_id
        WHERE rt.token_hash = $1`,
@@ -189,7 +189,7 @@ async function validateRefreshToken(token) {
     const res = await db.query(
       `SELECT rt.id AS token_id, rt.user_id, rt.family_id, rt.revoked_at, rt.expires_at,
               u.id AS id, u.email, u.name, u.role, u.wallet_public_key, u.wallet_type,
-              u.kyc_status, u.kyc_completed_at, u.token_version
+              u.kyc_status, u.kyc_completed_at, u.token_version, u.is_banned
        FROM refresh_tokens rt
        JOIN users u ON u.id = rt.user_id
        WHERE rt.token_hash = $1`,
@@ -526,6 +526,14 @@ router.post('/login', loginLimiter, loginValidation, validateRequest, asyncHandl
  *               type: object
  *               properties:
  *                 error: { type: string }
+ *       403:
+ *         description: The account is suspended
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error: { type: string }
  */
 router.post('/refresh', asyncHandler(async (req, res) => {
   const token = req.cookies?.[REFRESH_TOKEN_COOKIE_NAME];
@@ -540,6 +548,23 @@ router.post('/refresh', asyncHandler(async (req, res) => {
     return sendErrorResponse(res, 401, user?.reuseDetected
         ? 'Refresh token reuse detected; session revoked'
         : 'Invalid or expired refresh token');
+  }
+
+  if (user.is_banned) {
+    if (user.family_id) {
+      await db.query(
+        'UPDATE refresh_tokens SET revoked_at = NOW() WHERE family_id = $1 AND revoked_at IS NULL',
+        [user.family_id]
+      );
+    } else {
+      await db.query(
+        'UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL',
+        [user.user_id]
+      );
+    }
+    clearRefreshTokenCookie(res);
+    clearAccessTokenCookie(res);
+    return sendErrorResponse(res, 403, 'Your account has been suspended');
   }
 
   const { accessToken } = generateTokens(user);
