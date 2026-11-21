@@ -6,11 +6,11 @@ import CampaignStatusBadge from './CampaignStatusBadge';
 import { CATEGORY_KEYS } from '../lib/categories';
 
 function progressColor(pct, status) {
-  if (status === 'funded' || pct >= 100) return '#10b981'; // green — goal reached
+  if (status === 'funded' || pct >= 100) return 'var(--color-success-text, #10b981)'; // goal reached
   if (status === 'closed' || status === 'withdrawn' || status === 'refunded' || status === 'failed')
-    return '#6b7280'; // grey — ended
-  if (pct >= 75) return '#3b82f6'; // blue — nearly there
-  return '#7c3aed'; // default purple
+    return 'var(--color-text-hint, #6b7280)'; // ended
+  if (pct >= 75) return 'var(--color-info-text, #3b82f6)'; // nearly there
+  return 'var(--color-accent, #7c3aed)'; // default purple
 }
 
 function daysLeft(deadline) {
@@ -30,7 +30,7 @@ export default function CampaignCard({ campaign, featured }) {
   const pct = Math.min(100, (campaign.raised_amount / campaign.target_amount) * 100).toFixed(1);
   const fillColor = progressColor(parseFloat(pct), campaign.status);
   const deadline = daysLeft(campaign.deadline);
-  const deadlineColor = deadline?.kind === 'ended' ? '#ef4444' : '#f59e0b';
+  const deadlineColor = deadline?.kind === 'ended' ? 'var(--color-error-text, #ef4444)' : 'var(--color-warning-text, #f59e0b)';
 
   return (
     <Link
