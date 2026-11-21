@@ -72,6 +72,7 @@ module.exports = [
       'react/no-unescaped-entities': 'off',
       'no-empty': 'off',
       'no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
+      'no-duplicate-imports': 'error',    // prevent duplicate module declarations (#412)
       'prettier/prettier': 'error',
     },
     settings: {

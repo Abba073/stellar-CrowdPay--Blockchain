@@ -1,13 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { useTranslation } from 'react-i18next';
-
-const DialogContext = createContext(null);
-
-const FOCUSABLE_SELECTOR = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
-
-export function DialogProvider({ children }) {
-  const { t } = useTranslation();
-import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import * as Sentry from '@sentry/react';
 
 const DialogContext = createContext(null);
@@ -22,7 +13,6 @@ export function DialogProvider({ children }) {
   const restoreRef = useRef(null);
   const inputRef = useRef(null);
   const confirmBtnRef = useRef(null);
-  const dialogRef = useRef(null);
 
   const open = useCallback((kind, message, options = {}) => {
     restoreRef.current = document.activeElement;
@@ -96,10 +86,23 @@ export function DialogProvider({ children }) {
               gap: '0.75rem',
             }}
           >
+            {dialog.options.title && (
+              <p style={{ margin: 0, fontWeight: 700 }}>{dialog.options.title}</p>
+            )}
             {/* Rendered as a text node — never as HTML — so server messages are safe. */}
             <p id="app-dialog-message" style={{ margin: 0 }}>
               {dialog.message}
             </p>
+            {dialog.options.summary && dialog.options.summary.length > 0 && (
+              <dl style={{ margin: 0, display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '0.25rem 0.75rem', fontSize: '0.875rem' }}>
+                {dialog.options.summary.map((row) => (
+                  <>
+                    <dt key={`dt-${row.label}`} style={{ color: 'var(--color-text-hint, #888)' }}>{row.label}</dt>
+                    <dd key={`dd-${row.label}`} style={{ margin: 0, fontWeight: 600 }}>{row.value}</dd>
+                  </>
+                ))}
+              </dl>
+            )}
             {dialog.kind === 'prompt' && (
               <input
                 ref={inputRef}
@@ -115,11 +118,15 @@ export function DialogProvider({ children }) {
                   className="btn-secondary"
                   onClick={() => close(dialog.kind === 'prompt' ? null : false)}
                 >
-                  Cancel
+                  {dialog.options.cancelLabel || 'Cancel'}
                 </button>
               )}
-              <button type="submit" className="btn-primary" ref={confirmBtnRef}>
-                OK
+              <button
+                type="submit"
+                className={dialog.options.danger ? 'btn-danger' : 'btn-primary'}
+                ref={confirmBtnRef}
+              >
+                {dialog.options.confirmLabel || 'OK'}
               </button>
             </div>
           </form>
