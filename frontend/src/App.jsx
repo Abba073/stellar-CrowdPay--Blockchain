@@ -23,35 +23,34 @@ import { DialogProvider } from './context/DialogContext';
 
 export default function App() {
   const location = useLocation();
-  const hideNavbar = location.pathname.startsWith('/widget/');
+  const hideNavbar =
+    location.pathname.startsWith('/widget/') || location.pathname.startsWith('/embed/');
 
   return (
     <ThemeProvider>
       <AuthProvider>
         <DialogProvider>
-        <ToastProvider>
-        <DialogProvider>
-        {!hideNavbar && <Navbar />}
-        <Routes>
-          <Route path="/" element={<Home />} />
-          <Route path="/campaigns/new" element={<CreateCampaign />} />
-          <Route path="/campaigns/:id" element={<Campaign />} />
-          <Route path="/campaigns/:id/invite/:token" element={<AcceptInvite />} />
-          <Route path="/embed/campaigns/:id" element={<CampaignEmbed />} />
-          <Route path="/widget/campaigns/:id" element={<Widget />} />
-          <Route path="/login" element={<Login />} />
-          <Route path="/register" element={<Register />} />
-          <Route path="/forgot-password" element={<ForgotPassword />} />
-          <Route path="/reset-password" element={<ResetPassword />} />
-          <Route path="/admin" element={<AdminDashboard />} />
-          <Route path="/developer" element={<Developer />} />
-          <Route path="/dashboard" element={<Dashboard />} />
-          <Route path="/profile" element={<Profile />} />
-          <Route path="/my-contributions" element={<Navigate to="/dashboard?tab=contributions" replace />} />
-          <Route path="*" element={<NotFound />} />
-        </Routes>
-        </DialogProvider>
-        </ToastProvider>
+          <ToastProvider>
+            {!hideNavbar && <Navbar />}
+            <Routes>
+              <Route path="/" element={<Home />} />
+              <Route path="/campaigns/new" element={<CreateCampaign />} />
+              <Route path="/campaigns/:id" element={<Campaign />} />
+              <Route path="/campaigns/:id/invite/:token" element={<AcceptInvite />} />
+              <Route path="/embed/campaigns/:id" element={<CampaignEmbed />} />
+              <Route path="/widget/campaigns/:id" element={<Widget />} />
+              <Route path="/login" element={<Login />} />
+              <Route path="/register" element={<Register />} />
+              <Route path="/forgot-password" element={<ForgotPassword />} />
+              <Route path="/reset-password" element={<ResetPassword />} />
+              <Route path="/admin" element={<AdminDashboard />} />
+              <Route path="/developer" element={<Developer />} />
+              <Route path="/dashboard" element={<Dashboard />} />
+              <Route path="/profile" element={<Profile />} />
+              <Route path="/my-contributions" element={<Navigate to="/dashboard?tab=contributions" replace />} />
+              <Route path="*" element={<NotFound />} />
+            </Routes>
+          </ToastProvider>
         </DialogProvider>
       </AuthProvider>
     </ThemeProvider>

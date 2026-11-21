@@ -24,4 +24,3 @@ npm-debug.log*
 .kiro/
 
 # Docker
-.dockerignore
