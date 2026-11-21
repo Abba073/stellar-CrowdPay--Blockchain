@@ -103,6 +103,32 @@ function scrubTransactionEvent(event) {
   }
 
   if (Array.isArray(event.spans)) {
+    event.spans = event.spans.map((span) => {
+      if (!span || typeof span !== 'object') return span;
+      const cleaned = { ...span };
+      if (cleaned.description) cleaned.description = stripQueryString(cleaned.description);
+      if (cleaned.op && typeof cleaned.op === 'string') {
+        cleaned.op = stripQueryString(cleaned.op);
+      }
+      if (cleaned.data && typeof cleaned.data === 'object') {
+        const data = { ...cleaned.data };
+        delete data['http.query'];
+        delete data['http.fragment'];
+        delete data['http.request.query'];
+        delete data['http.request.cookies'];
+        delete data['http.request.headers'];
+        delete data['http.response.headers'];
+        delete data['user.id'];
+        delete data['campaign.id'];
+        delete data['campaignId'];
+        delete data['userId'];
+        if (typeof data.url === 'string') data.url = stripQueryString(data.url);
+        if (typeof data['http.url'] === 'string') data['http.url'] = stripQueryString(data['http.url']);
+        if (typeof data['http.target'] === 'string') data['http.target'] = stripQueryString(data['http.target']);
+        cleaned.data = data;
+      }
+      return cleaned;
+    });
     event.spans = event.spans.map(scrubSpan);
   }
 
