@@ -1074,7 +1074,7 @@ router.post('/', requireAuth, requireRole('creator', 'admin'), idempotency, crea
 }));
 
 // PATCH /campaigns/:id - Update campaign (title, description, deadline)
-router.patch('/:id', campaignBodyParser, requireAuth, asyncHandler(async (req, res) => {
+router.patch('/:id', campaignBodyParser, requireAuth, requireCampaignMember('owner', 'manager'), asyncHandler(async (req, res) => {
   const campaignId = req.params.id;
   const { title, description, deadline, escrow_contract_id, milestones_contract_id } = req.body;
 
@@ -1085,7 +1085,7 @@ router.patch('/:id', campaignBodyParser, requireAuth, asyncHandler(async (req, r
     }
   }
 
-  // Check if campaign exists and belongs to user
+  // Check if campaign exists
   const { rows: campaignRows } = await db.query(
     'SELECT * FROM campaigns WHERE id = $1',
     [campaignId]
