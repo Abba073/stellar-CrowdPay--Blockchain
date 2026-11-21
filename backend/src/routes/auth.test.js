@@ -502,6 +502,29 @@ test('POST /api/auth/refresh issues new tokens from a valid refresh cookie', asy
   assert.ok(res.body.user, 'user must be present');
 });
 
+test('POST /api/auth/refresh rejects banned users and revokes their session family', async () => {
+  const { app, tokensDb, users } = buildHttpApp();
+
+  const regRes = await request(app)
+    .post('/api/auth/register')
+    .send({ email: 'banned-refresh@example.com', password: 'pass1234', name: 'Banned' });
+  assert.equal(regRes.status, 201);
+
+  const rotationRes = await request(app)
+    .post('/api/auth/refresh')
+    .set('Cookie', regRes.headers['set-cookie']);
+  assert.equal(rotationRes.status, 200);
+
+  users[0].is_banned = true;
+  const res = await request(app)
+    .post('/api/auth/refresh')
+    .set('Cookie', rotationRes.headers['set-cookie']);
+
+  assert.equal(res.status, 403);
+  assert.match(res.body.error.message, /suspended/i);
+  assert.ok([...tokensDb.values()].every((record) => record.revoked_at !== null));
+});
+
 test('POST /api/auth/refresh returns 401 when no cookie is present', async () => {
   const { app } = buildHttpApp();
 
