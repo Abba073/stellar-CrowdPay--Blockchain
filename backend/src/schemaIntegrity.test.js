@@ -7,6 +7,8 @@ const MIGRATIONS_DIR = path.join(__dirname, '..', 'db', 'migrations');
 
 const constants = require('./utils/constants');
 
+const SCHEMA_FILE = path.join(__dirname, '..', 'db', 'schema.sql');
+
 // Every campaign status the application can persist. The database constraint
 // must accept all of them or write paths (admin suspension, refunds, etc.)
 // fail at runtime with CHECK violations.
@@ -72,6 +74,28 @@ function readAllMigrations() {
   return files
     .map((f) => fs.readFileSync(path.join(MIGRATIONS_DIR, f), 'utf8'))
     .join('\n');
+}
+
+function readSchema() {
+  return fs.readFileSync(SCHEMA_FILE, 'utf8');
+}
+
+// Every exported status set in utils/constants.js must be backed by a real
+// column in schema.sql or by a CHECK constraint in a migration. This prevents
+// status sets from being added for schema objects that do not exist.
+function collectStatusSets() {
+  return Object.entries(constants)
+    .filter(
+      ([name, value]) =>
+        /_STATUSES$/.test(name) && Array.isArray(value) && value.length > 0,
+    )
+    .map(([name, value]) => ({ name, values: value }));
+}
+
+// Derives the column name a status set is expected to constrain, e.g.
+// WITHDRAWAL_STATUSES -> status on withdrawal_requests.
+function expectedColumnFor(statusSetName) {
+  return 'status';
 }
 
 // Replays a constraint's evolution exactly as migrate.js would apply it, in
@@ -140,6 +164,55 @@ test('schema integrity: campaigns_status_check allows every status the app uses'
     [...EXPECTED_CAMPAIGN_STATUSES].sort(),
     'final campaigns_status_check must allow every status the application writes, including suspended',
   );
+});
+
+test('schema integrity: every exported status set maps to a real schema column', () => {
+  const schemaSql = readSchema();
+  const migrationsSql = readAllMigrations();
+  const allSql = `${schemaSql}\n${migrationsSql}`;
+
+  const statusSets = collectStatusSets();
+
+  assert.ok(
+    statusSets.length > 0,
+    'utils/constants.js must export at least one *_STATUSES set',
+  );
+
+  for (const { name, values } of statusSets) {
+    const column = expectedColumnFor(name);
+
+    // The column must exist somewhere in the schema or migrations.
+    const columnRe = new RegExp(`\\b${column}\\b`, 'i');
+    assert.ok(
+      columnRe.test(allSql),
+      `${name}: no "${column}" column exists in schema.sql or migrations`,
+    );
+
+    // At least one CHECK constraint must reference the column and accept the
+    // values the constant declares.
+    const checkRe = new RegExp(
+      `CHECK\\s*\\(\\s*${column}\\s+IN\\s*\\(([^)]*)\\)\\s*\\)`,
+      'gi',
+    );
+
+    let match;
+    let backed = false;
+    while ((match = checkRe.exec(allSql)) !== null) {
+      const allowed = match[1]
+        .split(',')
+        .map((s) => s.trim().replace(/^'/, '').replace(/'$/, ''));
+
+      if (values.every((v) => allowed.includes(v))) {
+        backed = true;
+        break;
+      }
+    }
+
+    assert.ok(
+      backed,
+      `${name}: no CHECK constraint on "${column}" accepts all of its values`,
+    );
+  }
 });
 
 test('schema integrity: every status CHECK constraint matches the app constants', () => {

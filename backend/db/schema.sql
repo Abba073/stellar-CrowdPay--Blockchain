@@ -15,7 +15,9 @@ CREATE TABLE users (
   password_hash           TEXT NOT NULL,
   name                    TEXT NOT NULL,
   wallet_public_key       TEXT UNIQUE NOT NULL,
-  wallet_secret_encrypted TEXT NOT NULL,
+  wallet_type             TEXT NOT NULL DEFAULT 'custodial'
+                          CHECK (wallet_type IN ('custodial', 'freighter')),
+  wallet_secret_encrypted TEXT,
   role                    TEXT NOT NULL DEFAULT 'contributor'
                           CHECK (role IN ('contributor', 'creator', 'admin')),
   kyc_status              kyc_status NOT NULL DEFAULT 'unverified',

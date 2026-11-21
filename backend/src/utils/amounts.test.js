@@ -9,6 +9,8 @@ process.env.STELLAR_HORIZON_URL = process.env.STELLAR_HORIZON_URL || 'https://ho
 
 const {
   STROOPS_PER_UNIT,
+  MAX_AMOUNT_STROOPS,
+  InvalidAmountError,
   parseAmountToStroops,
   formatStroops,
   normalizeAmount,
@@ -29,11 +31,42 @@ test('parseAmountToStroops converts decimal strings exactly', () => {
   assert.equal(parseAmountToStroops(' 1.5 '), 15000000n);
 });
 
-test('parseAmountToStroops trims excess decimals toward zero (never floats)', () => {
-  // A value like this previously rounded/errored via toFixed(7); deterministic
-  // truncation matches NUMERIC(20,7) storage and on-chain 7-decimal limits.
-  assert.equal(parseAmountToStroops('1.00000005'), STROOPS_PER_UNIT);
-  assert.equal(parseAmountToStroops('1.99999999'), 19999999n);
+test('parseAmountToStroops accepts exactly 7 fractional digits', () => {
+  assert.equal(parseAmountToStroops('1.0000000'), STROOPS_PER_UNIT);
+  assert.equal(parseAmountToStroops('1.9999999'), 19999999n);
+  assert.equal(parseAmountToStroops('0.1234567'), 1234567n);
+});
+
+test('parseAmountToStroops rejects more than 7 fractional digits (no silent truncation)', () => {
+  // Previously these were padded then sliced, silently dropping precision.
+  for (const bad of ['1.99999999', '1.00000005', '0.00000001', '0.12345678']) {
+    assert.throws(
+      () => parseAmountToStroops(bad),
+      InvalidAmountError,
+      `expected ${bad} to be rejected`,
+    );
+  }
+});
+
+test('parseAmountToStroops enforces the NUMERIC(20,7) upper bound', () => {
+  // 20 total digits, 7 of them fractional => 13 integer digits max.
+  assert.equal(MAX_AMOUNT_STROOPS, 9999999999999n * STROOPS_PER_UNIT + 9999999n);
+  assert.equal(parseAmountToStroops('9999999999999.9999999'), MAX_AMOUNT_STROOPS);
+  assert.equal(parseAmountToStroops('9999999999999'), 9999999999999n * STROOPS_PER_UNIT);
+
+  // One stroop above the column maximum must be rejected, not sent to Postgres.
+  assert.throws(
+    () => parseAmountToStroops('10000000000000'),
+    InvalidAmountError,
+  );
+  assert.throws(
+    () => parseAmountToStroops('9999999999999.9999999'.replace(/9$/, '') + '9'.repeat(1) + '0'),
+    InvalidAmountError,
+  );
+  assert.throws(
+    () => parseAmountToStroops('99999999999999'),
+    InvalidAmountError,
+  );
 });
 
 test('parseAmountToStroops rejects non-decimal and scientific input', () => {
@@ -52,7 +85,7 @@ test('formatStroops renders trimmed decimal strings', () => {
 });
 
 test('formatStroops and parseAmountToStroops round-trip', () => {
-  for (const value of ['0', '0.0000001', '0.5', '10', '1234567890123.1234567']) {
+  for (const value of ['0', '0.0000001', '0.5', '10', '1234567890123.1234567', '9999999999999.9999999']) {
     assert.equal(formatStroops(parseAmountToStroops(value)), value);
   }
 });

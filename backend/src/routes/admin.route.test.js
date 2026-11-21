@@ -42,17 +42,24 @@ function buildAdminApp({ queryImpl, authUser, isAdmin = true, isSuperAdmin = fal
       invalidate: () => {},
       invalidatePrefix: () => {},
     },
+    '../middleware/requestContext': {
+      getRequestContext: () => null,
+    },
     '../middleware/auth': {
       requireAuth: (req, _res, next) => {
         req.user = user;
         next();
       },
       requireAdmin: (req, res, next) => {
-        if (!req.user.is_admin) return res.status(403).json({ error: 'Requires admin privileges' });
+        if (!req.user.is_admin) {
+          return res.status(403).json({ error: { message: 'Requires admin privileges' } });
+        }
         next();
       },
       requireSuperAdmin: (req, res, next) => {
-        if (!req.user.is_super_admin) return res.status(403).json({ error: 'Requires super-admin privileges' });
+        if (!req.user.is_super_admin) {
+          return res.status(403).json({ error: { message: 'Requires super-admin privileges' } });
+        }
         next();
       },
     },
@@ -84,6 +91,7 @@ test('PATCH /promote: non-super-admin admin gets 403', async () => {
 });
 
 test('PATCH /promote: super-admin can promote a regular user', async () => {
+  let promoteUpdate;
   const app = buildAdminApp({
     isAdmin: true,
     isSuperAdmin: true,
@@ -92,7 +100,8 @@ test('PATCH /promote: super-admin can promote a regular user', async () => {
         return { rows: [{ id: 'user-1', email: 'user@example.com', is_admin: false }] };
       }
       if (text.includes('UPDATE users SET is_admin = true')) {
-        return { rows: [{ id: 'user-1', email: 'user@example.com', is_admin: true }] };
+        promoteUpdate = text;
+        return { rows: [{ id: 'user-1', email: 'user@example.com', is_admin: true, role: 'admin' }] };
       }
       if (text.includes('INSERT INTO admin_actions')) {
         return { rows: [] };
@@ -107,6 +116,8 @@ test('PATCH /promote: super-admin can promote a regular user', async () => {
 
   assert.equal(res.status, 200);
   assert.equal(res.body.user.is_admin, true);
+  assert.equal(res.body.user.role, 'admin');
+  assert.match(promoteUpdate, /SET is_admin = true, role = 'admin'/);
 });
 
 test('PATCH /promote: returns 400 if user is already an admin', async () => {
@@ -191,6 +202,7 @@ test('PATCH /demote: blocks demoting the last admin (409)', async () => {
 });
 
 test('PATCH /demote: super-admin can demote another admin when quorum is maintained', async () => {
+  let demoteUpdate;
   const app = buildAdminApp({
     isAdmin: true,
     isSuperAdmin: true,
@@ -204,7 +216,8 @@ test('PATCH /demote: super-admin can demote another admin when quorum is maintai
         return { rows: [{ count: '1' }] };
       }
       if (text.includes('UPDATE users SET is_admin = false')) {
-        return { rows: [{ id: 'admin-2', email: 'admin2@example.com', is_admin: false }] };
+        demoteUpdate = text;
+        return { rows: [{ id: 'admin-2', email: 'admin2@example.com', is_admin: false, role: 'contributor' }] };
       }
       if (text.includes('INSERT INTO admin_actions')) {
         return { rows: [] };
@@ -219,6 +232,8 @@ test('PATCH /demote: super-admin can demote another admin when quorum is maintai
 
   assert.equal(res.status, 200);
   assert.equal(res.body.user.is_admin, false);
+  assert.equal(res.body.user.role, 'contributor');
+  assert.match(demoteUpdate, /SET is_admin = false, role = 'contributor'/);
 });
 
 test('PATCH /demote: returns 404 if user does not exist', async () => {
@@ -255,4 +270,29 @@ test('PATCH /demote: returns 400 when target is not an admin', async () => {
 
   assert.equal(res.status, 400);
   assert.match(res.body.error.message, /not an admin/i);
+});
+
+test('GET /audit-log: rejects malformed UUID and pagination bounds', async () => {
+  let queryCount = 0;
+  const app = buildAdminApp({
+    queryImpl: async () => {
+      queryCount += 1;
+      return { rows: [] };
+    },
+  });
+
+  const malformedId = await request(app)
+    .get('/api/admin/audit-log')
+    .query({ before_id: '------------------------------------' });
+  const negativeOffset = await request(app)
+    .get('/api/admin/audit-log')
+    .query({ offset: '-1' });
+  const fractionalLimit = await request(app)
+    .get('/api/admin/audit-log')
+    .query({ limit: '1.5' });
+
+  assert.equal(malformedId.status, 400);
+  assert.equal(negativeOffset.status, 400);
+  assert.equal(fractionalLimit.status, 400);
+  assert.equal(queryCount, 0);
 });

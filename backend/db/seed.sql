@@ -8,6 +8,12 @@
 -- wallets with a NULL wallet_secret_encrypted, so no raw or fake secret material is ever
 -- written. Use the register flow for fully functional custodial wallets tied to the active
 -- encryption provider.
+--
+-- Bootstrap contract: this file is applied directly after backend/db/schema.sql (the
+-- documented `schema.sql && db:seed` path). schema.sql therefore defines wallet_type and
+-- allows wallet_secret_encrypted to be NULL, so no conditional logic is required here.
+-- Every statement below is idempotent (ON CONFLICT ... DO UPDATE / DO NOTHING) so the seed
+-- can be run repeatedly, including the CI "seed twice" step.
 
 -- Insert mock users
 INSERT INTO users (id, email, password_hash, name, wallet_public_key, wallet_secret_encrypted, wallet_type, role, is_admin)
@@ -45,7 +51,15 @@ VALUES
     'admin',
     TRUE
   )
-ON CONFLICT (email) DO NOTHING;
+ON CONFLICT (email) DO UPDATE
+SET
+  password_hash = EXCLUDED.password_hash,
+  name = EXCLUDED.name,
+  wallet_public_key = EXCLUDED.wallet_public_key,
+  wallet_secret_encrypted = EXCLUDED.wallet_secret_encrypted,
+  wallet_type = EXCLUDED.wallet_type,
+  role = EXCLUDED.role,
+  is_admin = EXCLUDED.is_admin;
 
 -- Insert mock campaigns
 INSERT INTO campaigns (id, creator_id, title, description, target_amount, raised_amount, asset_type, wallet_public_key, status, deadline)
@@ -100,11 +114,13 @@ VALUES
   )
 ON CONFLICT (id) DO UPDATE
 SET
+  creator_id = EXCLUDED.creator_id,
   title = EXCLUDED.title,
   description = EXCLUDED.description,
   target_amount = EXCLUDED.target_amount,
   raised_amount = EXCLUDED.raised_amount,
   asset_type = EXCLUDED.asset_type,
+  wallet_public_key = EXCLUDED.wallet_public_key,
   status = EXCLUDED.status,
   deadline = EXCLUDED.deadline;
 
@@ -161,7 +177,13 @@ VALUES
     'Three engineers and one manufacturing advisor have confirmed support for the first cohort.',
     NOW() - INTERVAL '2 days'
   )
-ON CONFLICT (id) DO NOTHING;
+ON CONFLICT (id) DO UPDATE
+SET
+  campaign_id = EXCLUDED.campaign_id,
+  author_id = EXCLUDED.author_id,
+  title = EXCLUDED.title,
+  body = EXCLUDED.body,
+  created_at = EXCLUDED.created_at;
 
 -- Insert mock milestones
 INSERT INTO milestones (id, campaign_id, title, description, release_percentage, sort_order, status, evidence_url, destination_key, review_note, created_at, completed_at, approved_at, released_at)
@@ -214,7 +236,21 @@ VALUES
     NULL,
     NULL
   )
-ON CONFLICT (id) DO NOTHING;
+ON CONFLICT (id) DO UPDATE
+SET
+  campaign_id = EXCLUDED.campaign_id,
+  title = EXCLUDED.title,
+  description = EXCLUDED.description,
+  release_percentage = EXCLUDED.release_percentage,
+  sort_order = EXCLUDED.sort_order,
+  status = EXCLUDED.status,
+  evidence_url = EXCLUDED.evidence_url,
+  destination_key = EXCLUDED.destination_key,
+  review_note = EXCLUDED.review_note,
+  created_at = EXCLUDED.created_at,
+  completed_at = EXCLUDED.completed_at,
+  approved_at = EXCLUDED.approved_at,
+  released_at = EXCLUDED.released_at;
 
 -- Insert mock contributions
 INSERT INTO contributions (id, campaign_id, sender_public_key, amount, asset, payment_type, source_amount, source_asset, conversion_rate, path, tx_hash, created_at)
@@ -275,4 +311,16 @@ VALUES
     'tx-mock-hardware-001',
     NOW() - INTERVAL '5 days'
   )
-ON CONFLICT (id) DO NOTHING;
+ON CONFLICT (id) DO UPDATE
+SET
+  campaign_id = EXCLUDED.campaign_id,
+  sender_public_key = EXCLUDED.sender_public_key,
+  amount = EXCLUDED.amount,
+  asset = EXCLUDED.asset,
+  payment_type = EXCLUDED.payment_type,
+  source_amount = EXCLUDED.source_amount,
+  source_asset = EXCLUDED.source_asset,
+  conversion_rate = EXCLUDED.conversion_rate,
+  path = EXCLUDED.path,
+  tx_hash = EXCLUDED.tx_hash,
+  created_at = EXCLUDED.created_at;

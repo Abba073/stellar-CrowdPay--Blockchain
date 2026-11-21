@@ -8,10 +8,11 @@ const { Keypair } = require('@stellar/stellar-sdk');
 function buildApp({ commitFails = false } = {}) {
   process.env.PLATFORM_APPROVER_USER_ID = 'admin-1';
   process.env.PLATFORM_SECRET_KEY = Keypair.random().secret();
-  const state = { commitFails, claimed: false, submits: 0, txHashRecorded: null, released: false, insertedTx: [] };
+  const state = { commitFails, claimed: false, submits: 0, txHashRecorded: null, released: false, rejected: false, insertedTx: [] };
   const milestone = () => ({
     id: 'm-1', campaign_id: 'c-1', status: state.released ? 'released' : 'pending',
-    campaign_status: 'funded', evidence_url: 'https://e', destination_key: Keypair.random().publicKey(),
+    campaign_status: 'funded', evidence_url: state.rejected ? null : 'https://e',
+    destination_key: state.rejected ? null : Keypair.random().publicKey(),
     campaign_wallet_public_key: 'GCAMP', asset_type: 'XLM', raised_amount: '100', release_percentage: 50,
     creator_id: 'creator-1', creator_wallet_public_key: 'GCREATOR', wallet_secret_encrypted: 'enc',
     sort_order: 0, title: 'M1', release_tx_hash: state.txHashRecorded, release_signed_xdr: state.txHashRecorded ? 'xdr' : null,
@@ -19,6 +20,35 @@ function buildApp({ commitFails = false } = {}) {
   });
 
   const query = async (text, params) => {
+    if (text.includes('INSERT INTO idempotency_keys')) {
+      const key = `${params[0]}:${params[1]}`;
+      if (idempotencyStore.has(key)) return { rows: [] };
+      idempotencyStore.set(key, { request_hash: params[4], completed_at: null });
+      return { rows: [{ user_id: params[0] }] };
+    }
+    if (text.includes('SELECT request_hash')) {
+      const key = `${params[0]}:${params[1]}`;
+      return { rows: idempotencyStore.has(key) ? [idempotencyStore.get(key)] : [] };
+    }
+    if (text.includes('UPDATE idempotency_keys')) {
+      const key = `${params[0]}:${params[1]}`;
+      Object.assign(idempotencyStore.get(key), {
+        response_status: params[2],
+        response_body: JSON.parse(params[3]),
+        completed_at: new Date(),
+      });
+      return { rows: [] };
+    }
+    if (text.includes('DELETE FROM idempotency_keys')) {
+      idempotencyStore.delete(`${params[0]}:${params[1]}`);
+      return { rows: [] };
+    }
+    if (text.includes("SET status = 'pending'")) {
+      state.rejected = text.includes('evidence_url = NULL')
+        && text.includes('destination_key = NULL')
+        && text.includes('completed_at = NULL');
+      return { rows: [{ id: 'm-1', campaign_id: 'c-1', sort_order: 0 }] };
+    }
     if (text.includes('FROM milestones m') && text.includes('JOIN campaigns c')) return { rows: [milestone()] };
     if (text.includes('SET release_claimed_at = NOW()')) {
       if (state.claimed || state.released) return { rows: [] };
@@ -48,10 +78,16 @@ function buildApp({ commitFails = false } = {}) {
     release: () => {},
   };
 
+  const idempotencyStore = new Map();
+  const { idempotency } = proxyquire('../middleware/idempotency', {
+    '../config/database': { query },
+    '../config/logger': { error: () => {} },
+  });
   const router = proxyquire('./milestones', {
     '../config/database': { query, connect: async () => client },
     '../config/logger': { error: () => {}, warn: () => {}, info: () => {} },
     '../middleware/auth': { requireAuth: (req, _res, next) => { req.user = { userId: 'admin-1' }; next(); } },
+    '../middleware/idempotency': { idempotency },
     '../services/alerting': { sendAlert: () => {} },
     '../services/stellarService': {
       buildWithdrawalTransaction: async () => 'unsigned',
@@ -116,4 +152,37 @@ test('reconciliation retry after the milestone was released returns 409 without 
   const res = await request(app).post('/api/milestones/m-1/approve').send({});
   assert.equal(res.status, 409);
   assert.equal(state.submits, 0);
+});
+
+test('rejected milestones require fresh evidence before release', async () => {
+  const { app, state } = buildApp();
+  const rejected = await request(app).post('/api/milestones/m-1/reject').send({ reason: 'Insufficient evidence' });
+  assert.equal(rejected.status, 200);
+  assert.equal(state.rejected, true);
+
+  const approval = await request(app).post('/api/milestones/m-1/release').send({});
+  assert.equal(approval.status, 409);
+  assert.equal(state.submits, 0);
+});
+
+test('release and approve routes replay responses for repeated idempotency keys', async () => {
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+  for (const path of ['release', 'approve']) {
+    const { app, state } = buildApp();
+    const first = await request(app)
+      .post(`/api/milestones/m-1/${path}`)
+      .set('Idempotency-Key', `replay-${path}`)
+      .send({});
+    await flush();
+    const replay = await request(app)
+      .post(`/api/milestones/m-1/${path}`)
+      .set('Idempotency-Key', `replay-${path}`)
+      .send({});
+
+    assert.equal(first.status, 200, path);
+    assert.equal(replay.status, 200, path);
+    assert.deepEqual(replay.body, first.body, path);
+    assert.equal(replay.headers['idempotent-replayed'], 'true', path);
+    assert.equal(state.submits, 1, path);
+  }
 });

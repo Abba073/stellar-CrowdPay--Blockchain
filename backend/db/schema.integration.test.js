@@ -11,6 +11,48 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 test.after(() => pool.end());
 
+const schemaSql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
+const seedSql = fs.readFileSync(path.join(__dirname, 'seed.sql'), 'utf8');
+
+// Creates a throwaway database, runs `statements` against it, then drops it.
+// Used to verify each documented bootstrap path in isolation.
+async function withFreshDatabase(fn) {
+  const dbName = `bootstrap_test_${process.pid}_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+  const admin = await pool.connect();
+  try {
+    await admin.query(`CREATE DATABASE ${dbName}`);
+  } finally {
+    admin.release();
+  }
+  const url = new URL(process.env.DATABASE_URL);
+  url.pathname = `/${dbName}`;
+  const fresh = new Pool({ connectionString: url.toString() });
+  try {
+    await fn(fresh);
+  } finally {
+    await fresh.end();
+    const cleanup = await pool.connect();
+    try {
+      await cleanup.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`);
+    } finally {
+      cleanup.release();
+    }
+  }
+}
+
+async function assertSeedableFromSchemaOnly(client) {
+  await client.query(schemaSql);
+  await client.query(seedSql);
+  const { rows } = await client.query(
+    `SELECT wallet_type, wallet_secret_encrypted FROM users WHERE wallet_type IS NOT NULL`
+  );
+  assert.ok(rows.length > 0, 'seed.sql should insert users');
+  for (const row of rows) {
+    assert.equal(row.wallet_type, 'freighter');
+    assert.equal(row.wallet_secret_encrypted, null);
+  }
+}
+
 async function inRolledBackTransaction(fn) {
   const client = await pool.connect();
   try {
@@ -91,6 +133,31 @@ test('contribution tx_hash uniqueness and campaign status check are enforced', a
       client.query(`UPDATE campaigns SET status = 'bogus' WHERE id = $1`, [campaign.id]),
       { code: '23514' }
     );
+  });
+});
+
+test('bootstrap path (a): schema.sql + seed.sql works without migrations', async () => {
+  await withFreshDatabase(async (client) => {
+    await assertSeedableFromSchemaOnly(client);
+  });
+});
+
+test('bootstrap path (b): schema.sql + migrations + seed.sql works', async () => {
+  await withFreshDatabase(async (client) => {
+    await client.query(schemaSql);
+    const files = fs.readdirSync(path.join(__dirname, 'migrations')).filter((f) => f.endsWith('.sql')).sort();
+    for (const file of files) {
+      await client.query(fs.readFileSync(path.join(__dirname, 'migrations', file), 'utf8'));
+    }
+    await client.query(seedSql);
+    const { rows } = await client.query(
+      `SELECT wallet_type, wallet_secret_encrypted FROM users WHERE wallet_type IS NOT NULL`
+    );
+    assert.ok(rows.length > 0, 'seed.sql should insert users');
+    for (const row of rows) {
+      assert.equal(row.wallet_type, 'freighter');
+      assert.equal(row.wallet_secret_encrypted, null);
+    }
   });
 });
 

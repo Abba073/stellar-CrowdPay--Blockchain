@@ -182,8 +182,8 @@ router.put('/preferences', requireAuth, notificationPreferencesValidation, valid
  */
 router.patch('/:id/read', requireAuth, notificationIdValidation, validateRequestBadRequest, async (req, res) => {
   const { rows } = await db.query(
-    `UPDATE notifications SET read_at = NOW()
-     WHERE id = $1 AND user_id = $2 AND read_at IS NULL
+    `UPDATE notifications SET read_at = COALESCE(read_at, NOW())
+     WHERE id = $1 AND user_id = $2
      RETURNING id`,
     [req.params.id, req.user.userId]
   );

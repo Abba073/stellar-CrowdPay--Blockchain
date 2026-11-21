@@ -26,9 +26,115 @@ test('blocks cross-site POST via Sec-Fetch-Site', async () => {
   assert.equal(res.status, 403);
 });
 
-test('allows same-site POST via Sec-Fetch-Site', async () => {
-  const res = await request(buildApp()).post('/thing').set('Sec-Fetch-Site', 'same-site');
+test('rejects forged same-site Sec-Fetch-Site with a non-allowlisted Origin', async () => {
+  const res = await request(buildApp())
+    .post('/thing')
+    .set('Sec-Fetch-Site', 'same-site')
+    .set('Origin', 'https://evil.example');
+  assert.equal(res.status, 403);
+});
+
+test('rejects forged same-origin Sec-Fetch-Site with a non-allowlisted Origin', async () => {
+  const res = await request(buildApp())
+    .post('/thing')
+    .set('Sec-Fetch-Site', 'same-origin')
+    .set('Origin', 'https://evil.example');
+  assert.equal(res.status, 403);
+});
+
+test('rejects forged same-site Sec-Fetch-Site from a sibling subdomain', async (t) => {
+  const saved = process.env.FRONTEND_URLS;
+  process.env.FRONTEND_URLS = 'https://app.crowdpay.io';
+  t.after(() => {
+    if (saved !== undefined) process.env.FRONTEND_URLS = saved;
+    else delete process.env.FRONTEND_URLS;
+  });
+  const res = await request(buildApp())
+    .post('/thing')
+    .set('Sec-Fetch-Site', 'same-site')
+    .set('Origin', 'https://evil.crowdpay.io');
+  assert.equal(res.status, 403);
+});
+
+test('allows allowlisted Origin even with a same-site Sec-Fetch-Site header', async (t) => {
+  const saved = process.env.FRONTEND_URLS;
+  process.env.FRONTEND_URLS = 'https://app.crowdpay.io';
+  t.after(() => {
+    if (saved !== undefined) process.env.FRONTEND_URLS = saved;
+    else delete process.env.FRONTEND_URLS;
+  });
+  const res = await request(buildApp())
+    .post('/thing')
+    .set('Sec-Fetch-Site', 'same-site')
+    .set('Origin', 'https://app.crowdpay.io');
   assert.equal(res.status, 200);
+});
+
+test('rejects http Origin when the allowlist entry is https', async (t) => {
+  const saved = process.env.FRONTEND_URLS;
+  process.env.FRONTEND_URLS = 'https://app.crowdpay.io';
+  t.after(() => {
+    if (saved !== undefined) process.env.FRONTEND_URLS = saved;
+    else delete process.env.FRONTEND_URLS;
+  });
+  const res = await request(buildApp())
+    .post('/thing')
+    .set('Origin', 'http://app.crowdpay.io');
+  assert.equal(res.status, 403);
+});
+
+test('rejects Origin with a mismatched port', async (t) => {
+  const saved = process.env.FRONTEND_URLS;
+  process.env.FRONTEND_URLS = 'https://app.crowdpay.io';
+  t.after(() => {
+    if (saved !== undefined) process.env.FRONTEND_URLS = saved;
+    else delete process.env.FRONTEND_URLS;
+  });
+  const res = await request(buildApp())
+    .post('/thing')
+    .set('Origin', 'https://app.crowdpay.io:8443');
+  assert.equal(res.status, 403);
+});
+
+test('rejects Origin with a mismatched port against a ported allowlist entry', async (t) => {
+  const saved = process.env.FRONTEND_URLS;
+  process.env.FRONTEND_URLS = 'http://localhost:5173';
+  t.after(() => {
+    if (saved !== undefined) process.env.FRONTEND_URLS = saved;
+    else delete process.env.FRONTEND_URLS;
+  });
+  const res = await request(buildApp())
+    .post('/thing')
+    .set('Origin', 'http://localhost:9999');
+  assert.equal(res.status, 403);
+});
+
+test('spoofed Host header does not grant access to a non-allowlisted Origin', async (t) => {
+  const saved = process.env.FRONTEND_URLS;
+  process.env.FRONTEND_URLS = 'https://app.crowdpay.io';
+  t.after(() => {
+    if (saved !== undefined) process.env.FRONTEND_URLS = saved;
+    else delete process.env.FRONTEND_URLS;
+  });
+  const res = await request(buildApp())
+    .post('/thing')
+    .set('Host', 'app.crowdpay.io')
+    .set('Origin', 'https://evil.example');
+  assert.equal(res.status, 403);
+});
+
+test('spoofed Host header with matching scheme does not grant access', async (t) => {
+  const saved = process.env.FRONTEND_URLS;
+  process.env.FRONTEND_URLS = 'https://app.crowdpay.io';
+  t.after(() => {
+    if (saved !== undefined) process.env.FRONTEND_URLS = saved;
+    else delete process.env.FRONTEND_URLS;
+  });
+  const res = await request(buildApp())
+    .post('/thing')
+    .set('Host', 'app.crowdpay.io')
+    .set('Origin', 'http://app.crowdpay.io');
+  assert.equal(res.status, 403);
 });
 
 test('blocks POST from a foreign Origin when Sec-Fetch-Site is absent', async () => {

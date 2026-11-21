@@ -53,3 +53,51 @@ test('validators and the parser agree: isFloat-style inputs that used to slip th
     assert.equal(tryParseAmountToStroops(slipped), null);
   }
 });
+
+test('more than seven fractional digits is rejected instead of silently truncated', () => {
+  const tooPrecise = ['1.99999999', '0.12345678', '10.00000001'];
+  for (const bad of tooPrecise) {
+    assert.throws(
+      () => parseAmountToStroops(bad, 'amount'),
+      (err) => {
+        assert.ok(err instanceof InvalidAmountError, `expected InvalidAmountError for ${bad}`);
+        assert.equal(err.status, 422);
+        assert.equal(err.code, 'VALIDATION_ERROR');
+        assert.equal(err.field, 'amount');
+        return true;
+      }
+    );
+    assert.throws(() => parseUserAmount(bad, 'amount'), (err) => err instanceof InvalidAmountError && err.status === 422);
+    assert.equal(tryParseAmountToStroops(bad), null);
+  }
+});
+
+test('seven fractional digits is accepted at the precision boundary', () => {
+  assert.equal(parseAmountToStroops('1.9999999'), 19999999n);
+  assert.equal(parseUserAmount('1.9999999', 'amount'), 19999999n);
+  assert.equal(tryParseAmountToStroops('1.9999999'), 19999999n);
+});
+
+test('amounts exceeding the NUMERIC(20,7) maximum are rejected', () => {
+  const tooLarge = ['99999999999999', '1000000000000', '9999999999999.9999999'];
+  for (const bad of tooLarge) {
+    assert.throws(
+      () => parseAmountToStroops(bad, 'target_amount'),
+      (err) => {
+        assert.ok(err instanceof InvalidAmountError, `expected InvalidAmountError for ${bad}`);
+        assert.equal(err.status, 422);
+        assert.equal(err.code, 'VALIDATION_ERROR');
+        assert.equal(err.field, 'target_amount');
+        return true;
+      }
+    );
+    assert.throws(() => parseUserAmount(bad, 'target_amount'), (err) => err instanceof InvalidAmountError && err.status === 422);
+    assert.equal(tryParseAmountToStroops(bad), null);
+  }
+});
+
+test('the NUMERIC(20,7) maximum itself is accepted', () => {
+  assert.equal(parseAmountToStroops('9999999999999.9999999'), 99999999999999999999n);
+  assert.equal(parseUserAmount('9999999999999.9999999', 'amount'), 99999999999999999999n);
+  assert.equal(tryParseAmountToStroops('9999999999999.9999999'), 99999999999999999999n);
+});

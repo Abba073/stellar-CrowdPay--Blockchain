@@ -37,6 +37,48 @@ function scrubHeaders(headers) {
   return scrubbed;
 }
 
+function scrubDataObject(data) {
+  if (!data || typeof data !== 'object') return data;
+  const cleaned = { ...data };
+  delete cleaned['http.query'];
+  delete cleaned['http.fragment'];
+  delete cleaned['http.request.query'];
+  delete cleaned['http.request.cookies'];
+  delete cleaned['http.request.headers'];
+  delete cleaned['http.response.headers'];
+  delete cleaned['user.id'];
+  delete cleaned['campaign.id'];
+  delete cleaned['campaignId'];
+  delete cleaned['userId'];
+  if (typeof cleaned.url === 'string') cleaned.url = stripQueryString(cleaned.url);
+  if (typeof cleaned['http.url'] === 'string') cleaned['http.url'] = stripQueryString(cleaned['http.url']);
+  if (typeof cleaned['http.target'] === 'string') cleaned['http.target'] = stripQueryString(cleaned['http.target']);
+  return cleaned;
+}
+
+function scrubSpan(span) {
+  if (!span || typeof span !== 'object') return span;
+  const cleaned = { ...span };
+  if (cleaned.description) cleaned.description = stripQueryString(cleaned.description);
+  if (cleaned.op && typeof cleaned.op === 'string') {
+    cleaned.op = stripQueryString(cleaned.op);
+  }
+  if (cleaned.data && typeof cleaned.data === 'object') {
+    cleaned.data = scrubDataObject(cleaned.data);
+  }
+  return cleaned;
+}
+
+function scrubException(exception) {
+  if (!exception || typeof exception !== 'object') return exception;
+  const cleaned = { ...exception };
+  if (typeof cleaned.value === 'string') cleaned.value = stripQueryString(cleaned.value);
+  return cleaned;
+}
+
+// Shared scrubber used for both transaction (trace) events and error events.
+// Strips URL query strings, PII headers, cookies, request bodies and reduces
+// user data to an opaque id so secrets never reach Sentry.
 function scrubTransactionEvent(event) {
   if (!event || typeof event !== 'object') return event;
 
@@ -61,32 +103,11 @@ function scrubTransactionEvent(event) {
   }
 
   if (Array.isArray(event.spans)) {
-    event.spans = event.spans.map((span) => {
-      if (!span || typeof span !== 'object') return span;
-      const cleaned = { ...span };
-      if (cleaned.description) cleaned.description = stripQueryString(cleaned.description);
-      if (cleaned.op && typeof cleaned.op === 'string') {
-        cleaned.op = stripQueryString(cleaned.op);
-      }
-      if (cleaned.data && typeof cleaned.data === 'object') {
-        const data = { ...cleaned.data };
-        delete data['http.query'];
-        delete data['http.fragment'];
-        delete data['http.request.query'];
-        delete data['http.request.cookies'];
-        delete data['http.request.headers'];
-        delete data['http.response.headers'];
-        delete data['user.id'];
-        delete data['campaign.id'];
-        delete data['campaignId'];
-        delete data['userId'];
-        if (typeof data.url === 'string') data.url = stripQueryString(data.url);
-        if (typeof data['http.url'] === 'string') data['http.url'] = stripQueryString(data['http.url']);
-        if (typeof data['http.target'] === 'string') data['http.target'] = stripQueryString(data['http.target']);
-        cleaned.data = data;
-      }
-      return cleaned;
-    });
+    event.spans = event.spans.map(scrubSpan);
+  }
+
+  if (Array.isArray(event.exception && event.exception.values)) {
+    event.exception.values = event.exception.values.map(scrubException);
   }
 
   return event;
@@ -98,6 +119,7 @@ Sentry.init({
   tracesSampleRate: resolveTracesSampleRate(),
   enabled: !!process.env.SENTRY_DSN,
   integrations: [Sentry.expressIntegration()],
+  beforeSend: scrubTransactionEvent,
   beforeSendTransaction: scrubTransactionEvent,
 });
 
@@ -413,3 +435,4 @@ if (require.main === module) {
 
 module.exports = app;
 module.exports.openApiSpec = openApiSpec;
+module.exports.scrubTransactionEvent = scrubTransactionEvent;

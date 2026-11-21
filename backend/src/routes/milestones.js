@@ -438,7 +438,10 @@ router.post('/:id/reject', requireAuth, async (req, res) => {
     `UPDATE milestones
      SET status = 'pending',
          review_note = $1,
-         approved_at = NULL
+         approved_at = NULL,
+         evidence_url = NULL,
+         destination_key = NULL,
+         completed_at = NULL
      WHERE id = $2 AND status <> 'released'
      RETURNING *`,
     [reason, req.params.id]
@@ -844,8 +847,6 @@ const approveMilestoneReleaseHandler = async (req, res) => {
  *       503:
  *         description: Creator signature could not be produced
  */
-router.post('/:id/release', requireAuth, approveMilestoneReleaseHandler);
-
 /**
  * @openapi
  * /milestones/{id}/approve:
@@ -891,7 +892,6 @@ router.post('/:id/release', requireAuth, approveMilestoneReleaseHandler);
  *       503:
  *         description: Creator signature could not be produced
  */
-router.post('/:id/approve', requireAuth, approveMilestoneReleaseHandler);
 router.post('/:id/release', requireAuth, idempotency, approveMilestoneReleaseHandler);
 // Deprecated alias of POST /:id/release (see API.md).
 router.post('/:id/approve', requireAuth, idempotency, approveMilestoneReleaseHandler);
