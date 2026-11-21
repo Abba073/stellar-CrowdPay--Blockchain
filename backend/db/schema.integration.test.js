@@ -168,3 +168,56 @@ test('database contains no plaintext wallet secrets (seed included)', async () =
   );
   assert.deepEqual(rows, []);
 });
+
+const SEED_SQL = fs.readFileSync(path.join(__dirname, 'seed.sql'), 'utf8');
+
+test('seeded campaigns have owner rows, future deadlines and active status', async () => {
+  await inRolledBackTransaction(async (client) => {
+    await client.query(SEED_SQL);
+
+    const { rows: campaigns } = await client.query(
+      `SELECT c.id, c.deadline, c.status, c.creator_id
+         FROM campaigns c
+         JOIN users u ON u.id = c.creator_id
+        WHERE u.email = 'admin@example.com'`
+    );
+    assert.equal(campaigns.length, 4);
+
+    for (const campaign of campaigns) {
+      const { rows: owners } = await client.query(
+        `SELECT role, status FROM campaign_members
+          WHERE campaign_id = $1 AND user_id = $2`,
+        [campaign.id, campaign.creator_id]
+      );
+      assert.equal(owners.length, 1, `campaign ${campaign.id} missing owner row`);
+      assert.equal(owners[0].role, 'owner');
+      assert.equal(owners[0].status, 'accepted');
+
+      const { rows: [{ future }] } = await client.query(
+        `SELECT $1::timestamptz > NOW() AS future`,
+        [campaign.deadline]
+      );
+      assert.equal(future, true, `campaign ${campaign.id} deadline is in the past`);
+      assert.notEqual(campaign.status, 'expired');
+      assert.equal(campaign.status, 'active');
+    }
+  });
+});
+
+test('re-running seed does not overwrite an existing admin password hash or role', async () => {
+  await inRolledBackTransaction(async (client) => {
+    await client.query(
+      `INSERT INTO users (email, password_hash, name, role, is_admin)
+       VALUES ('admin@example.com', 'preexisting-hash', 'Existing Admin', 'user', false)`
+    );
+
+    await client.query(SEED_SQL);
+
+    const { rows: [admin] } = await client.query(
+      `SELECT password_hash, role, is_admin FROM users WHERE email = 'admin@example.com'`
+    );
+    assert.equal(admin.password_hash, 'preexisting-hash');
+    assert.equal(admin.role, 'user');
+    assert.equal(admin.is_admin, false);
+  });
+});

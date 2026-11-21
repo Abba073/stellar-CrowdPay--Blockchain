@@ -325,7 +325,6 @@ app.get('/api/stats', async (_req, res) => {
   if (cached) return res.json(cached);
 
   try {
-const db = require('./config/database');
     const [campaigns, raised, contributions] = await Promise.all([
       db.query(`SELECT COUNT(*)::int AS total
                 FROM campaigns
