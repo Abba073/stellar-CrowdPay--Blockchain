@@ -28,6 +28,20 @@ function jsFiles(dir) {
   });
 }
 
+function stripSqlComments(sql) {
+  return sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
+}
+
+// Extract every table referenced by application SQL: FROM/JOIN (SELECT), UPDATE,
+// INSERT INTO and DELETE FROM. Returns lowercased table names.
+function referencedTables(src) {
+  const sql = stripSqlComments(src);
+  const re = /\b(?:FROM|JOIN|UPDATE|INSERT\s+INTO|DELETE\s+FROM)\s+(?:public\.)?"?(\w+)"?/gi;
+  const tables = new Set();
+  for (const m of sql.matchAll(re)) tables.add(m[1].toLowerCase());
+  return tables;
+}
+
 test('every migration-managed table used by application SQL has DDL in a migration or schema.sql', () => {
   const tables = definedTables();
   // Tables the app depends on for membership/multisig features (issue: missing DDL).
@@ -38,12 +52,29 @@ test('every migration-managed table used by application SQL has DDL in a migrati
   const missing = new Map();
   for (const file of jsFiles(path.join(__dirname, '..'))) {
     const src = fs.readFileSync(file, 'utf8');
-    for (const m of src.matchAll(/\b(?:INSERT\s+INTO|DELETE\s+FROM)\s+(\w+)/g)) {
-      const t = m[1].toLowerCase();
+    for (const t of referencedTables(src)) {
       if (!tables.has(t)) missing.set(t, path.relative(path.join(__dirname, '..'), file));
     }
   }
-  assert.deepEqual([...missing.entries()], [], 'tables written by app SQL but never created');
+  assert.deepEqual([...missing.entries()], [], 'tables referenced by app SQL but never created');
+});
+
+test('regression: tables referenced only in SELECT/UPDATE/JOIN are detected', () => {
+  const tables = definedTables();
+  const fixture = [
+    'SELECT * FROM made_up_select_table WHERE id = $1;',
+    'UPDATE made_up_update_table SET x = 1;',
+    'SELECT a.* FROM users a JOIN made_up_join_table b ON b.user_id = a.id;',
+    '-- SELECT * FROM made_up_commented_table;',
+    '/* UPDATE made_up_block_commented_table SET x = 1; */',
+  ].join('\n');
+  const found = referencedTables(fixture);
+  for (const t of ['made_up_select_table', 'made_up_update_table', 'made_up_join_table']) {
+    assert.ok(found.has(t), `expected ${t} to be extracted`);
+    assert.ok(!tables.has(t), `fixture table ${t} must not exist in DDL`);
+  }
+  assert.ok(!found.has('made_up_commented_table'), 'line comments must be stripped');
+  assert.ok(!found.has('made_up_block_commented_table'), 'block comments must be stripped');
 });
 
 test('campaign_members migration defines every column the routes use', () => {

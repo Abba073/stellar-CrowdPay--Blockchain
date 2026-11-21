@@ -6,9 +6,6 @@ module.exports = [
     ignores: [
       'node_modules/**',
       'coverage/**',
-      // campaigns.test.js has pre-existing structural corruption (interleaved test blocks
-      // from a bad merge) that causes parse errors. Excluded until the file is repaired.
-      'src/routes/campaigns.test.js',
     ],
   },
 

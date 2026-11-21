@@ -37,6 +37,48 @@ function scrubHeaders(headers) {
   return scrubbed;
 }
 
+function scrubDataObject(data) {
+  if (!data || typeof data !== 'object') return data;
+  const cleaned = { ...data };
+  delete cleaned['http.query'];
+  delete cleaned['http.fragment'];
+  delete cleaned['http.request.query'];
+  delete cleaned['http.request.cookies'];
+  delete cleaned['http.request.headers'];
+  delete cleaned['http.response.headers'];
+  delete cleaned['user.id'];
+  delete cleaned['campaign.id'];
+  delete cleaned['campaignId'];
+  delete cleaned['userId'];
+  if (typeof cleaned.url === 'string') cleaned.url = stripQueryString(cleaned.url);
+  if (typeof cleaned['http.url'] === 'string') cleaned['http.url'] = stripQueryString(cleaned['http.url']);
+  if (typeof cleaned['http.target'] === 'string') cleaned['http.target'] = stripQueryString(cleaned['http.target']);
+  return cleaned;
+}
+
+function scrubSpan(span) {
+  if (!span || typeof span !== 'object') return span;
+  const cleaned = { ...span };
+  if (cleaned.description) cleaned.description = stripQueryString(cleaned.description);
+  if (cleaned.op && typeof cleaned.op === 'string') {
+    cleaned.op = stripQueryString(cleaned.op);
+  }
+  if (cleaned.data && typeof cleaned.data === 'object') {
+    cleaned.data = scrubDataObject(cleaned.data);
+  }
+  return cleaned;
+}
+
+function scrubException(exception) {
+  if (!exception || typeof exception !== 'object') return exception;
+  const cleaned = { ...exception };
+  if (typeof cleaned.value === 'string') cleaned.value = stripQueryString(cleaned.value);
+  return cleaned;
+}
+
+// Shared scrubber used for both transaction (trace) events and error events.
+// Strips URL query strings, PII headers, cookies, request bodies and reduces
+// user data to an opaque id so secrets never reach Sentry.
 function scrubTransactionEvent(event) {
   if (!event || typeof event !== 'object') return event;
 
@@ -87,6 +129,11 @@ function scrubTransactionEvent(event) {
       }
       return cleaned;
     });
+    event.spans = event.spans.map(scrubSpan);
+  }
+
+  if (Array.isArray(event.exception && event.exception.values)) {
+    event.exception.values = event.exception.values.map(scrubException);
   }
 
   return event;
@@ -98,6 +145,7 @@ Sentry.init({
   tracesSampleRate: resolveTracesSampleRate(),
   enabled: !!process.env.SENTRY_DSN,
   integrations: [Sentry.expressIntegration()],
+  beforeSend: scrubTransactionEvent,
   beforeSendTransaction: scrubTransactionEvent,
 });
 
@@ -114,7 +162,6 @@ const { normalizeErrorResponse, errorHandler, sendErrorResponse } = require('./m
 const { startLedgerMonitor, getLedgerStreamHealth } = require('./services/ledgerMonitor');
 const { refreshActiveCampaignStatuses } = require('./services/campaignStatusService');
 const { sendAlert } = require('./services/alerting');
-const { createLedgerHealthHandler } = require('./routes/healthLedger');
 const { assertNoLegacyPlaintextUserWalletSecrets } = require('./services/walletSecrets');
 const db = require('./config/database');
 const { getPlatformFeeBps } = require('./utils/amounts');
@@ -304,7 +351,6 @@ app.get('/api/stats', async (_req, res) => {
   if (cached) return res.json(cached);
 
   try {
-const db = require('./config/database');
     const [campaigns, raised, contributions] = await Promise.all([
       db.query(`SELECT COUNT(*)::int AS total
                 FROM campaigns
@@ -329,10 +375,20 @@ const db = require('./config/database');
   }
 });
 
-app.get(
-  '/health/ledger',
-  createLedgerHealthHandler({ getLedgerStreamHealth, sendAlert, logger })
-);
+app.get('/health/ledger', async (_req, res) => {
+  try {
+    const body = await getLedgerStreamHealth();
+    res.json(body);
+  } catch (err) {
+    sendAlert('Ledger health check failed', {
+      alert_key: 'ledger_health',
+      fingerprint: 'health/ledger',
+      severity: 'critical',
+      error: err.message,
+    });
+    sendErrorResponse(res, 500, err.message || 'ledger health failed');
+  }
+});
 
 if (process.env.SERVE_FRONTEND === 'true') {
   const dist = path.join(__dirname, '../../frontend/dist');
@@ -405,3 +461,4 @@ if (require.main === module) {
 
 module.exports = app;
 module.exports.openApiSpec = openApiSpec;
+module.exports.scrubTransactionEvent = scrubTransactionEvent;

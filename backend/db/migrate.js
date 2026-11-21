@@ -3,8 +3,6 @@ const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-
 // Historical migrations in explicit dependency order (001_ needs the campaigns
 // table, so it runs after 20260401_). Never rename, reorder or append to this list.
 const LEGACY_MIGRATIONS = [
@@ -70,6 +68,7 @@ function orderMigrations(files) {
 }
 
 async function migrate() {
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
   const client = await pool.connect();
   try {
     // Create migrations tracking table if it doesn't exist
@@ -122,14 +121,26 @@ async function migrate() {
     }
 
     console.log(`[migrate] Done. ${count} migration(s) applied.`);
+    return 0;
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('[migrate] Failed:', err.message);
-    process.exit(1);
+    return 1;
   } finally {
     client.release();
     await pool.end();
   }
 }
 
-migrate();
+module.exports = { migrate, orderMigrations };
+
+if (require.main === module) {
+  migrate()
+    .then((code) => {
+      process.exitCode = code;
+    })
+    .catch((err) => {
+      console.error('[migrate] Failed:', err.message);
+      process.exitCode = 1;
+    });
+}

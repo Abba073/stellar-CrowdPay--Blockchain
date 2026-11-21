@@ -17,8 +17,10 @@ function buildApp(queryImpl) {
   return app;
 }
 
+const CAMPAIGN_ID = '3f1c2b4a-5d6e-4f70-8a91-b2c3d4e5f607';
+
 const activeCampaign = {
-  id: 42,
+  id: CAMPAIGN_ID,
   title: 'Community Garden Project',
   description: 'Building a sustainable urban garden',
   cover_image_url: 'https://cdn.example.com/covers/garden.jpg',
@@ -48,7 +50,7 @@ test('serves campaign title, description and og/twitter tags as an HTML fragment
     .get('/api/seo/head')
     .set('Host', 'crowdpay.example')
     .set('X-Forwarded-Proto', 'https')
-    .query({ path: '/campaigns/42' });
+    .query({ path: `/campaigns/${CAMPAIGN_ID}` });
 
   assert.equal(res.status, 200);
   assert.match(res.headers['content-type'], /text\/html/);
@@ -56,7 +58,7 @@ test('serves campaign title, description and og/twitter tags as an HTML fragment
   assert.match(res.text, /<title>Community Garden Project \| CrowdPay<\/title>/);
   assert.match(res.text, /<meta name="description" content="Building a sustainable urban garden" \/>/);
   assert.match(res.text, /<meta property="og:title" content="Community Garden Project" \/>/);
-  assert.match(res.text, /<meta property="og:url" content="https:\/\/crowdpay\.example\/campaigns\/42" \/>/);
+  assert.match(res.text, new RegExp(`<meta property="og:url" content="https:\\/\\/crowdpay\\.example\\/campaigns\\/${CAMPAIGN_ID}" \\/>`));
   assert.match(res.text, /<meta property="og:image" content="https:\/\/cdn\.example\.com\/covers\/garden\.jpg" \/>/);
   assert.match(res.text, /<meta name="twitter:card" content="summary_large_image" \/>/);
   assert.match(res.text, /<meta name="twitter:image" content="https:\/\/cdn\.example\.com\/covers\/garden\.jpg" \/>/);
@@ -71,7 +73,7 @@ test('relative cover images are absolutised against the request origin', async (
     .get('/api/seo/head')
     .set('Host', 'crowdpay.example')
     .set('X-Forwarded-Proto', 'https')
-    .query({ path: '/campaigns/42' });
+    .query({ path: `/campaigns/${CAMPAIGN_ID}` });
 
   assert.match(res.text, /<meta property="og:image" content="https:\/\/crowdpay\.example\/uploads\/garden\.jpg" \/>/);
 });
@@ -81,7 +83,7 @@ test('falls back to summary card and omits image tags without a cover', async ()
     rows: [{ ...activeCampaign, cover_image_url: null }],
   }));
 
-  const res = await request(app).get('/api/seo/head').query({ path: '/campaigns/42' });
+  const res = await request(app).get('/api/seo/head').query({ path: `/campaigns/${CAMPAIGN_ID}` });
 
   assert.match(res.text, /<meta name="twitter:card" content="summary" \/>/);
   assert.doesNotMatch(res.text, /og:image|twitter:image/);
@@ -96,7 +98,7 @@ test('escapes HTML in campaign fields', async () => {
     }],
   }));
 
-  const res = await request(app).get('/api/seo/head').query({ path: '/campaigns/42' });
+  const res = await request(app).get('/api/seo/head').query({ path: `/campaigns/${CAMPAIGN_ID}` });
 
   assert.doesNotMatch(res.text, /<script>|<b>/);
   assert.match(res.text, /&lt;script&gt;alert\(1\)&lt;\/script&gt; &amp; &quot;More&quot;/);
@@ -110,7 +112,7 @@ test('excludes deleted and draft campaigns from the lookup', async () => {
     return { rows: [] };
   });
 
-  const res = await request(app).get('/api/seo/head').query({ path: '/campaigns/7' });
+  const res = await request(app).get('/api/seo/head').query({ path: `/campaigns/${CAMPAIGN_ID}` });
 
   assert.equal(res.status, 200);
   assert.equal(res.text, '');
@@ -119,17 +121,18 @@ test('excludes deleted and draft campaigns from the lookup', async () => {
   assert.match(seen[0], /status <> 'draft'/);
 });
 
-test('non-numeric campaign ids are ignored without a database lookup', async () => {
+test('non-UUID campaign ids are ignored without a database lookup', async () => {
   let queries = 0;
   const app = buildApp(async () => {
     queries += 1;
     return { rows: [] };
   });
 
-  const res = await request(app).get('/api/seo/head').query({ path: '/campaigns/abc' });
-
-  assert.equal(res.status, 200);
-  assert.equal(res.text, '');
+  for (const path of ['/campaigns/abc', '/campaigns/42']) {
+    const res = await request(app).get('/api/seo/head').query({ path });
+    assert.equal(res.status, 200);
+    assert.equal(res.text, '');
+  }
   assert.equal(queries, 0);
 });
 
@@ -140,8 +143,8 @@ test('repeated requests for the same campaign are served from cache', async () =
     return { rows: [activeCampaign] };
   });
 
-  await request(app).get('/api/seo/head').query({ path: '/campaigns/42' });
-  await request(app).get('/api/seo/head').query({ path: '/campaigns/42' });
+  await request(app).get('/api/seo/head').query({ path: `/campaigns/${CAMPAIGN_ID}` });
+  await request(app).get('/api/seo/head').query({ path: `/campaigns/${CAMPAIGN_ID}` });
 
   assert.equal(queries, 1);
 });
