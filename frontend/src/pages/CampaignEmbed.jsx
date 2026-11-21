@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
@@ -26,6 +26,7 @@ export default function CampaignEmbed() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [isLive, setIsLive] = useState(false);
+  const prevHeightRef = useRef(0);
 
   // Extract campaign ID from useParams or URL path fallback: /embed/campaigns/:id
   const pathParts =
@@ -158,7 +159,10 @@ export default function CampaignEmbed() {
   useEffect(() => {
     const notifyHeight = () => {
       const height = document.documentElement.scrollHeight;
-      postToParent({ type: 'resize', height });
+      if (height !== prevHeightRef.current) {
+        prevHeightRef.current = height;
+        postToParent({ type: 'resize', height });
+      }
     };
 
     notifyHeight();
