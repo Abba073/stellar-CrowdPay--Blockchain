@@ -1,17 +1,39 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { useParams } from 'react-router-dom';
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
 const BASE_URL = import.meta.env.VITE_API_URL || `${API_BASE_URL}/api`;
 
+// Only post to the embedding host's origin (never '*'); skip when it can't be determined.
+export function getParentOrigin() {
+  try {
+    return document.referrer ? new URL(document.referrer).origin : null;
+  } catch {
+    return null;
+  }
+}
+
+function postToParent(message) {
+  const origin = getParentOrigin();
+  if (origin && window.parent !== window) {
+    window.parent.postMessage(message, origin);
+  }
+}
+
 export default function CampaignEmbed() {
+  const params = useParams();
   const [campaign, setCampaign] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [isLive, setIsLive] = useState(false);
+  const prevHeightRef = useRef(0);
 
-  // Extract campaign ID from URL path: /embed/campaigns/:id
-  const pathParts = window.location.pathname.split('/');
-  const campaignId = pathParts[pathParts.length - 1];
+  // Extract campaign ID from useParams or URL path fallback: /embed/campaigns/:id
+  const pathParts =
+    typeof window !== 'undefined' && window.location?.pathname
+      ? window.location.pathname.split('/').filter(Boolean)
+      : [];
+  const campaignId = params?.id || pathParts[pathParts.length - 1];
 
   useEffect(() => {
     if (!campaignId) {
@@ -36,46 +58,111 @@ export default function CampaignEmbed() {
       });
   }, [campaignId]);
 
-  // Connect to SSE for live updates
+  // Connect to SSE for live updates with auto-reconnect and stabilized deps
   useEffect(() => {
-    if (!campaignId || !campaign) return;
+    if (!campaignId) return;
     if (!window.EventSource) return;
 
-    const es = new EventSource(`${BASE_URL}/campaigns/${campaignId}/stream`);
+    let es = null;
+    let reconnectTimer = null;
+    let retryDelay = 1000;
+    const maxRetryDelay = 30000;
+    let isMounted = true;
 
-    es.onopen = () => setIsLive(true);
+    function connect() {
+      if (!isMounted) return;
+      if (es) {
+        try {
+          es.close();
+        } catch {}
+        es = null;
+      }
 
-    es.onmessage = (e) => {
-      let msg;
       try {
-        msg = JSON.parse(e.data);
+        es = new EventSource(`${BASE_URL}/campaigns/${campaignId}/stream`);
       } catch {
+        scheduleReconnect();
         return;
       }
 
-      if (msg.type === 'contribution') {
-        setCampaign((prev) =>
-          prev ? { ...prev, raised_amount: msg.raised_amount } : prev
-        );
-      }
-    };
+      es.onopen = () => {
+        if (!isMounted) return;
+        setIsLive(true);
+        retryDelay = 1000;
+      };
 
-    es.onerror = () => {
-      setIsLive(false);
-      es.close();
-    };
+      es.onmessage = (e) => {
+        if (!isMounted) return;
+        let msg;
+        try {
+          msg = JSON.parse(e.data);
+        } catch {
+          return;
+        }
+
+        if (msg.type === 'contribution') {
+          setCampaign((prev) => {
+            if (!prev) return prev;
+            const newRaised = msg.raised_amount ?? prev.raised_amount;
+            const target = Number(prev.target_amount) || 0;
+            const newPct = target > 0 ? Math.min(100, (Number(newRaised) / target) * 100) : 0;
+            return {
+              ...prev,
+              raised_amount: newRaised,
+              progress_percentage: newPct,
+              backer_count: msg.contribution
+                ? (Number(prev.backer_count) || 0) + 1
+                : prev.backer_count,
+            };
+          });
+        }
+      };
+
+      es.onerror = () => {
+        if (!isMounted) return;
+        setIsLive(false);
+        if (es) {
+          try {
+            es.close();
+          } catch {}
+          es = null;
+        }
+        scheduleReconnect();
+      };
+    }
+
+    function scheduleReconnect() {
+      if (!isMounted) return;
+      clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(() => {
+        connect();
+      }, retryDelay);
+      retryDelay = Math.min(retryDelay * 2, maxRetryDelay);
+    }
+
+    connect();
 
     return () => {
-      es.close();
+      isMounted = false;
+      clearTimeout(reconnectTimer);
+      if (es) {
+        try {
+          es.close();
+        } catch {}
+        es = null;
+      }
       setIsLive(false);
     };
-  }, [campaignId, campaign]);
+  }, [campaignId]);
 
   // Auto-resize iframe via postMessage
   useEffect(() => {
     const notifyHeight = () => {
       const height = document.documentElement.scrollHeight;
-      window.parent.postMessage({ type: 'resize', height }, '*');
+      if (height !== prevHeightRef.current) {
+        prevHeightRef.current = height;
+        postToParent({ type: 'resize', height });
+      }
     };
 
     notifyHeight();
@@ -102,30 +189,30 @@ export default function CampaignEmbed() {
     );
   }
 
-  const progressPct = Math.min(100, campaign.progress_percentage);
+  const raisedAmount = Number(campaign.raised_amount) || 0;
+  const targetAmount = Number(campaign.target_amount) || 0;
+  const computedPct = targetAmount > 0 ? (raisedAmount / targetAmount) * 100 : 0;
+  const rawPct = Number(campaign.progress_percentage);
+  const validPct = !Number.isNaN(rawPct) && Number.isFinite(rawPct) ? rawPct : computedPct;
+  const progressPct = Math.max(0, Math.min(100, Number.isFinite(validPct) ? validPct : 0));
+  const backerCount = Number(campaign.backer_count) || 0;
 
   return (
     <div style={styles.container}>
       {isLive && <span style={styles.liveIndicator} title="Live updates active" />}
-      
+
       <h1 style={styles.title}>{campaign.title}</h1>
-      
-      {campaign.description && (
-        <p style={styles.description}>{campaign.description}</p>
-      )}
+
+      {campaign.description && <p style={styles.description}>{campaign.description}</p>}
 
       <div style={styles.progressSection}>
         <div style={styles.amounts}>
           <div>
-            <span style={styles.raisedAmount}>
-              {Number(campaign.raised_amount).toLocaleString()}
-            </span>
+            <span style={styles.raisedAmount}>{raisedAmount.toLocaleString()}</span>
             <span style={styles.asset}>{campaign.asset_type}</span>
             <span style={styles.label}> raised</span>
           </div>
-          <div style={styles.target}>
-            {progressPct.toFixed(1)}%
-          </div>
+          <div style={styles.target}>{progressPct.toFixed(1)}%</div>
         </div>
 
         <div style={styles.progressBar}>
@@ -139,10 +226,10 @@ export default function CampaignEmbed() {
 
         <div style={styles.stats}>
           <span>
-            <strong>{campaign.backer_count}</strong> backer{campaign.backer_count !== 1 ? 's' : ''}
+            <strong>{backerCount}</strong> backer{backerCount !== 1 ? 's' : ''}
           </span>
           <span>
-            Goal: <strong>{Number(campaign.target_amount).toLocaleString()}</strong> {campaign.asset_type}
+            Goal: <strong>{targetAmount.toLocaleString()}</strong> {campaign.asset_type}
           </span>
         </div>
       </div>
@@ -154,7 +241,7 @@ export default function CampaignEmbed() {
         style={styles.ctaButton}
         onClick={() => {
           // Notify parent that user clicked (for analytics tracking)
-          window.parent.postMessage({ type: 'cta_click', campaignId: campaign.id }, '*');
+          postToParent({ type: 'cta_click', campaignId: campaign.id });
         }}
       >
         Back this campaign

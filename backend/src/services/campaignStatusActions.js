@@ -1,6 +1,6 @@
 const db = require('../config/database');
 const logger = require('../config/logger');
-const { sendEmail } = require('./emailService');
+const { sendEmailSafe } = require('./emailService');
 const { createNotification } = require('./notifications');
 const {
   emitWebhookEventForUser,
@@ -10,6 +10,7 @@ const {
 const { buildWithdrawalTransaction } = require('./stellarService');
 const { insertWithdrawalPendingSignatures } = require('./stellarTransactionService');
 const { invokeContract } = require('./sorobanService');
+const { sendAlert } = require('./alerting');
 
 function frontendBaseUrl() {
   return (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
@@ -68,6 +69,7 @@ async function loadContributorRecipients(campaignId) {
     `SELECT DISTINCT ON (u.id) u.id, u.email, u.name
      FROM contributions c
      JOIN users u ON u.wallet_public_key = c.sender_public_key
+        OR u.id IN (SELECT user_id FROM user_wallet_keys WHERE public_key = c.sender_public_key)
      WHERE c.campaign_id = $1
        AND u.email IS NOT NULL
      ORDER BY u.id, c.created_at ASC`,
@@ -99,7 +101,11 @@ async function syncSorobanStatus(campaign) {
       contract_id: campaign.escrow_contract_id,
       status: campaign.status,
     });
+    await db.query("UPDATE campaigns SET soroban_status = 'verified' WHERE id = $1", [campaign.id]);
   } catch (err) {
+    await db
+      .query("UPDATE campaigns SET soroban_status = 'failed' WHERE id = $1", [campaign.id])
+      .catch(() => {});
     logger.error('Soroban escrow verification failed after status transition', {
       campaign_id: campaign.id,
       contract_id: campaign.escrow_contract_id,
@@ -112,7 +118,7 @@ async function sendFundedEmails(campaign, contributors) {
   const campaignUrl = `${frontendBaseUrl()}/campaigns/${campaign.id}`;
   const creatorName = campaign.creator_name || 'there';
 
-  await sendEmail({
+  await sendEmailSafe({
     to: campaign.creator_email,
     subject: `Your campaign "${campaign.title}" has reached its goal`,
     text: [
@@ -130,7 +136,7 @@ async function sendFundedEmails(campaign, contributors) {
 
   await Promise.all(
     contributors.map((contributor) =>
-      sendEmail({
+      sendEmailSafe({
         to: contributor.email,
         subject: `Campaign you backed has been fully funded: "${campaign.title}"`,
         text: [
@@ -155,7 +161,7 @@ async function sendFailedEmails(campaign, contributors) {
     ? new Date(campaign.deadline).toDateString()
     : 'the deadline';
 
-  await sendEmail({
+  await sendEmailSafe({
     to: campaign.creator_email,
     subject: `Your campaign "${campaign.title}" ended below its goal`,
     text: [
@@ -173,7 +179,7 @@ async function sendFailedEmails(campaign, contributors) {
 
   await Promise.all(
     contributors.map((contributor) =>
-      sendEmail({
+      sendEmailSafe({
         to: contributor.email,
         subject: `Campaign ended — your refund is available: "${campaign.title}"`,
         text: [
@@ -280,7 +286,13 @@ async function queueFailedCampaignRefunds(campaignId, actorUserId) {
   const campaign = campaigns[0];
 
   const { rows: contributions } = await db.query(
-    `SELECT c.*
+    `SELECT c.*,
+            COALESCE(
+              (SELECT u.wallet_public_key FROM user_wallet_keys k
+                 JOIN users u ON u.id = k.user_id
+                WHERE k.public_key = c.sender_public_key),
+              c.sender_public_key
+            ) AS refund_destination_key
        FROM contributions c
        WHERE c.campaign_id = $1
          AND NOT EXISTS (
@@ -302,7 +314,7 @@ async function queueFailedCampaignRefunds(campaignId, actorUserId) {
     for (const contribution of contributions) {
       const unsignedXdr = await buildWithdrawalTransaction({
         campaignWalletPublicKey: campaign.wallet_public_key,
-        destinationPublicKey: contribution.sender_public_key,
+        destinationPublicKey: contribution.refund_destination_key || contribution.sender_public_key,
         amount: contribution.amount,
         asset: contribution.asset,
       });
@@ -311,13 +323,13 @@ async function queueFailedCampaignRefunds(campaignId, actorUserId) {
         `INSERT INTO withdrawal_requests
            (campaign_id, requested_by, amount, destination_key, unsigned_xdr,
             creator_signed, platform_signed, contribution_id, is_refund)
-         VALUES ($1, $2, $3, $4, $5, FALSE, FALSE, $6, TRUE)
+         VALUES ($1, $2, $3, $4, $5, TRUE, FALSE, $6, TRUE)
          RETURNING id`,
         [
           campaignId,
           actorUserId || refundActorUserId(campaign.creator_id),
           contribution.amount,
-          contribution.sender_public_key,
+          contribution.refund_destination_key || contribution.sender_public_key,
           unsignedXdr,
           contribution.id,
         ]
@@ -391,6 +403,21 @@ async function handleFailedTransition(campaign) {
   });
 }
 
+async function executeWithRetry(fn, retries = 2, delayMs = 50) {
+  let lastError;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (attempt < retries) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+  throw lastError;
+}
+
 /**
  * Run downstream actions after a campaign transitions to funded or failed.
  * Idempotent: duplicate calls for the same terminal status are no-ops.
@@ -411,6 +438,7 @@ async function triggerCampaignStatusActions(campaign, previousStatus) {
   const fullCampaign = await loadCampaignContext(campaign.id);
   if (!fullCampaign) {
     logger.error('Campaign not found for status actions', { campaign_id: campaign.id });
+    await db.query('DELETE FROM campaign_status_events WHERE id = $1', [eventId]).catch(() => {});
     return;
   }
 
@@ -421,12 +449,31 @@ async function triggerCampaignStatusActions(campaign, previousStatus) {
     event_id: eventId,
   });
 
-  if (campaign.status === 'funded') {
-    await handleFundedTransition(fullCampaign);
-  } else {
-    await handleFailedTransition(fullCampaign);
+  try {
+    await executeWithRetry(async () => {
+      if (campaign.status === 'funded') {
+        await handleFundedTransition(fullCampaign);
+      } else {
+        await handleFailedTransition(fullCampaign);
+      }
+    });
+  } catch (err) {
+    logger.error('Campaign status downstream side effects failed', {
+      campaign_id: campaign.id,
+      status: campaign.status,
+      error: err.message,
+    });
+    await sendAlert('Campaign status downstream side effects failed', {
+      campaign_id: campaign.id,
+      status: campaign.status,
+      error: err.message,
+    });
+    // Remove the recorded transition so that subsequent replays are not suppressed
+    await db.query('DELETE FROM campaign_status_events WHERE id = $1', [eventId]).catch(() => {});
+    throw err;
   }
 }
+
 
 module.exports = {
   triggerCampaignStatusActions,

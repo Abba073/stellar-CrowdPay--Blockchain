@@ -3,15 +3,23 @@
   "version": "1.0.0",
   "description": "CrowdPay backend — campaign logic, Stellar wallet management, Horizon listener",
   "main": "src/index.js",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "nodemon src/index.js",
     "start": "node src/index.js",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
-    "test": "NODE_ENV=test JWT_SECRET=testsecret USDC_ISSUER=GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5 STELLAR_NETWORK=testnet PLATFORM_SECRET_KEY=SCVMQUS5EMTHWBLJTE5XCSCMHB2ZOVKRR4ATVTRPUNRCOGKRENIL3LHR DATABASE_URL=postgresql://postgres:password@localhost:5433/crowdpay STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org WALLET_SECRET_LOCAL_KEK=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= node --test src/**/*.test.js",
+    "lint:no-ignore": "eslint src/ --no-ignore",
+    "test": "NODE_ENV=test JWT_SECRET=testsecret API_KEY_PEPPER=test-api-key-pepper USDC_ISSUER=GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5 STELLAR_NETWORK=testnet PLATFORM_SECRET_KEY=SCVMQUS5EMTHWBLJTE5XCSCMHB2ZOVKRR4ATVTRPUNRCOGKRENIL3LHR DATABASE_URL=postgresql://postgres:password@localhost:5432/crowdpay STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org WALLET_SECRET_LOCAL_KEK=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= node --test src/**/*.test.js",
+    "test:coverage": "NODE_ENV=test JWT_SECRET=testsecret API_KEY_PEPPER=test-api-key-pepper USDC_ISSUER=GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5 STELLAR_NETWORK=testnet PLATFORM_SECRET_KEY=SCVMQUS5EMTHWBLJTE5XCSCMHB2ZOVKRR4ATVTRPUNRCOGKRENIL3LHR DATABASE_URL=postgresql://postgres:password@localhost:5432/crowdpay STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org WALLET_SECRET_LOCAL_KEK=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= c8 --check-coverage --lines 70 --branches 70 --functions 70 --statements 70 --reporter=text --reporter=lcov --reporter=json-summary node --test src/**/*.test.js",
     "migrate": "node db/migrate.js",
+    "test:db": "node --test db/*.test.js",
     "migrate:fresh": "psql $DATABASE_URL -f db/schema.sql && node db/migrate.js",
-    "rotate-wallet-secrets": "node src/scripts/rotateWalletSecrets.js"
+    "db:seed": "psql $DATABASE_URL -v ON_ERROR_STOP=1 -1 -f db/seed.sql",
+    "rotate-wallet-secrets": "node src/scripts/rotateWalletSecrets.js",
+    "backfill-contributions": "node src/scripts/backfillContributions.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.410.0",
@@ -30,12 +38,14 @@
     "node-cron": "^3.0.3",
     "nodemailer": "^8.0.6",
     "pg": "^8.11.5",
+    "sanitize-html": "^2.18.1",
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1",
     "winston": "^3.19.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
+    "c8": "^9.1.0",
     "eslint": "^9.39.4",
     "nodemon": "^3.1.0",
     "proxyquire": "^2.1.3",

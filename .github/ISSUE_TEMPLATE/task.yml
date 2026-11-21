@@ -1,0 +1,74 @@
+name: Feature / task
+description: A unit of work a contributor (or their AI agent) can pick up and build end to end.
+title: "<short description>"
+labels: ["needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Issues in this repo are written to be used directly as prompts (see **Working with AI Agents** in CONTRIBUTING.md).
+        Be concrete: name files, describe current behaviour, and write acceptance criteria that can be checked one by one.
+        To ask about an existing issue, comment on its thread instead of opening a new one.
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Relevant files, routes, services, or contracts. Paths an agent should read first.
+      placeholder: |
+        backend/src/services/campaignStatusService.js
+        backend/src/routes/campaigns.js
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is missing or broken today.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: Who is affected and why it matters.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Suggested solution
+      description: The approach you expect, including existing patterns to follow.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: A checklist the PR must satisfy. Reviewers check each item before merging.
+      value: |
+        - [ ] 
+        - [ ] 
+        - [ ] Tests added or updated; `npm test` passes in `backend/` and `frontend/`
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - backend
+        - frontend
+        - contracts
+        - database
+        - CI / infrastructure
+        - docs
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: The acceptance criteria are specific enough to verify from a PR diff.
+          required: true

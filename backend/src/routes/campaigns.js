@@ -1,8 +1,12 @@
+const express = require('express');
 const router = require('express').Router();
+const { NOT_DELETED, findVisibleCampaign } = require('../utils/campaignVisibility');
 const multer = require('multer');
+const rateLimit = require('express-rate-limit');
 const db = require('../config/database');
 const logger = require('../config/logger');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requireRole, optionalAuth } = require('../middleware/auth');
+const { idempotency } = require('../middleware/idempotency');
 const {
   createCampaignWallet,
   getCampaignBalance,
@@ -12,23 +16,92 @@ const { watchCampaignWallet, addSSEClient, removeSSEClient } = require('../servi
 const { emitWebhookEventForUser, WEBHOOK_EVENTS } = require('../services/webhookDispatcher');
 const { refreshCampaignStatus, refreshActiveCampaignStatuses } = require('../services/campaignStatusService');
 const { queueFailedCampaignRefunds } = require('../services/campaignStatusActions');
-const { invokeContract, encodeMilestone, nativeToScVal } = require('../services/sorobanService');
-const { sendEmail } = require('../services/emailService');
+const { provisionCampaignContracts } = require('../services/sorobanService');
+const { isValidContractId, isSorobanEnabled } = require('../services/sorobanService');
+const { sendEmailSafe } = require('../services/emailService');
 const { uploadCampaignCoverImage } = require('../services/storage');
 const { isKycRequiredForCampaigns } = require('../services/kycProvider');
 const { listCreatorCampaigns } = require('../services/userDashboardService');
+const { encryptSecret } = require('../services/walletService');
 const {
   createCampaignValidation,
-  createCampaignUpdateValidation,
   getCampaignsValidation,
   validateRequest,
 } = require('../middleware/validation');
 const asyncHandler = require('../utils/asyncHandler');
+const { decodeCursor, pageWithCursor } = require('../utils/pagination');
+
+/** Listing sorts that support keyset (cursor) pagination. */
+const KEYSET_SORTS = {
+  newest: { name: 'newest', column: 'c.created_at', cast: 'timestamptz' },
+  most_funded: { name: 'most_funded', column: 'c.raised_amount', cast: 'numeric' },
+};
+const cache = require('../utils/cache');
 
 const crypto = require('crypto');
+const { sendErrorResponse } = require('../middleware/errorHandler');
+
+async function provisionSorobanContracts(campaign, creatorPublicKey, milestones) {
+  try {
+    const contracts = await provisionCampaignContracts({
+      campaignId: campaign.id,
+      creatorPublicKey,
+      targetAmount: campaign.target_amount,
+      assetType: campaign.asset_type,
+      deadline: campaign.deadline,
+      milestones,
+    });
+    if (!contracts) {
+      logger.warn('Soroban provisioning not configured; campaign left pending', { campaign_id: campaign.id });
+      return;
+    }
+    // Never persist a malformed contract id: a typo here would only surface
+    // later during fund release, potentially locking the campaign.
+    if (!isValidContractId(contracts.escrowContractId) || !isValidContractId(contracts.milestonesContractId)) {
+      logger.error('Soroban provisioning returned invalid contract ids', {
+        campaign_id: campaign.id,
+        escrow_contract_id: contracts.escrowContractId,
+        milestones_contract_id: contracts.milestonesContractId,
+      });
+      await db
+        .query("UPDATE campaigns SET soroban_status = 'failed' WHERE id = $1", [campaign.id])
+        .catch(() => {});
+      return;
+    }
+    await db.query(
+      `UPDATE campaigns
+       SET escrow_contract_id = $1, milestones_contract_id = $2, soroban_status = 'verified'
+       WHERE id = $3`,
+      [contracts.escrowContractId, contracts.milestonesContractId, campaign.id]
+    );
+  } catch (err) {
+    logger.error('Soroban contract provisioning failed', { campaign_id: campaign.id, error: err.message });
+    await db
+      .query("UPDATE campaigns SET soroban_status = 'failed' WHERE id = $1", [campaign.id])
+      .catch(() => {});
+  }
+}
 
 function stripHtml(value = '') {
   return String(value).replace(/<[^>]*>/g, '').trim();
+}
+
+/**
+ * Validate admin/env-supplied Soroban contract ids before they are persisted.
+ * Returns an error message string when invalid, otherwise null.
+ */
+function validateContractIdsInput({ escrow_contract_id, milestones_contract_id }) {
+  const fields = {
+    escrow_contract_id,
+    milestones_contract_id,
+  };
+  for (const [field, value] of Object.entries(fields)) {
+    if (value === undefined || value === null || value === '') continue;
+    if (!isValidContractId(value)) {
+      return `${field} must be a valid Soroban contract id (StrKey starting with "C", 56 characters)`;
+    }
+  }
+  return null;
 }
 
 /**
@@ -41,10 +114,10 @@ function stripHtml(value = '') {
 const requireCampaignMember = (...allowedRoles) => {
   return asyncHandler(async (req, res, next) => {
     const campaignId = req.params.id || req.params.campaign_id || req.body.campaign_id;
-    if (!campaignId) return res.status(400).json({ error: 'Campaign ID is required' });
+    if (!campaignId) return sendErrorResponse(res, 400, 'Campaign ID is required');
 
     if (!req.user || !req.user.userId) {
-      return res.status(401).json({ error: 'Unauthorized' });
+      return sendErrorResponse(res, 401, 'Unauthorized');
     }
 
     const { rows: campaignRows } = await db.query(
@@ -52,7 +125,7 @@ const requireCampaignMember = (...allowedRoles) => {
       [campaignId]
     );
     if (!campaignRows.length) {
-      return res.status(404).json({ error: 'Campaign not found' });
+      return sendErrorResponse(res, 404, 'Campaign not found');
     }
     const campaign = campaignRows[0];
 
@@ -74,7 +147,7 @@ const requireCampaignMember = (...allowedRoles) => {
     }
 
     if (!role || (allowedRoles.length && !allowedRoles.includes(role))) {
-      return res.status(403).json({ error: 'Insufficient permissions for this campaign' });
+      return sendErrorResponse(res, 403, 'Insufficient permissions for this campaign');
     }
 
     req.campaignRole = role;
@@ -84,7 +157,7 @@ const requireCampaignMember = (...allowedRoles) => {
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 },
+  limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 20 },
   fileFilter: (_req, file, cb) => {
     const allowed = ['image/jpeg', 'image/png', 'image/webp'];
     if (!allowed.includes(file.mimetype)) {
@@ -98,8 +171,24 @@ const SUPPORTED_ASSETS = getSupportedAssetCodes();
 const MILESTONE_PERCENT_SCALE = 10000;
 const MILESTONE_LIMIT = 5;
 
+// Text-heavy campaign routes accept markdown/description bodies; cap them tighter
+// than the global JSON limit so oversized payloads fail fast with a 413.
+const campaignBodyParser = express.json({ limit: '10kb' });
+
+const isTest = process.env.NODE_ENV === 'test';
+
+// Rate limiter for public read-only endpoints (backers, etc.)
+const publicReadLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: isTest ? 100000 : 60,
+  message: { error: 'Too many requests, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => isTest,
+});
+
 function normalizeMilestonesInput(input) {
-  if (input == null) return [];
+  if (input == null) return []; // eslint-disable-line eqeqeq
   if (!Array.isArray(input)) {
     throw new Error('milestones must be an array');
   }
@@ -167,6 +256,11 @@ router.get('/', getCampaignsValidation, validateRequest, asyncHandler(async (req
    *       - in: query
    *         name: offset
    *         schema: { type: integer, minimum: 0 }
+   *         description: Legacy offset paging. Prefer `cursor` for sort=newest / most_funded.
+   *       - in: query
+   *         name: cursor
+   *         schema: { type: string }
+   *         description: Opaque `next_cursor` from the previous page (sort=newest or most_funded).
    *     responses:
    *       200:
    *         description: OK
@@ -175,15 +269,16 @@ router.get('/', getCampaignsValidation, validateRequest, asyncHandler(async (req
    *             schema:
    *               type: object
    *               properties:
-   *                 total: { type: integer }
+   *                 total: { type: integer, description: Only on the first page }
    *                 limit: { type: integer }
-   *                 offset: { type: integer }
+   *                 offset: { type: integer, description: Only for offset-paged requests }
+   *                 next_cursor: { type: string, nullable: true }
    *                 campaigns:
    *                   type: array
    *                   items:
    *                     type: object
    */
-  const { search, status, asset, sort = 'newest' } = req.query;
+  const { search, status, asset, category, sort = 'newest' } = req.query;
   const limit = Math.min(Number(req.query.limit || 20), 100);
   const offset = Math.max(Number(req.query.offset || 0), 0);
   const filters = [];
@@ -202,6 +297,18 @@ router.get('/', getCampaignsValidation, validateRequest, asyncHandler(async (req
     params.push(asset);
     filters.push(`c.asset_type = $${params.length}`);
   }
+  let searchParam = null;
+  if (search && String(search).trim()) {
+    searchParam = String(search).trim();
+    params.push(searchParam);
+    // Use PostgreSQL full-text search via the generated tsvector column (search_vector)
+    // set up by migration 20260602_campaign_search_vector.sql.
+    // plainto_tsquery handles multi-word queries and is injection-safe.
+    filters.push(`c.search_vector @@ plainto_tsquery('english', $${params.length})`);
+  if (category) {
+    params.push(category);
+    filters.push(`c.category = $${params.length}`);
+  }
   if (search) {
     const escaped = String(search).replace(/[%_\\]/g, '\\$&');
     params.push(`%${escaped}%`);
@@ -210,19 +317,82 @@ router.get('/', getCampaignsValidation, validateRequest, asyncHandler(async (req
     );
   }
 
-  const whereClause = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
-  const countQuery = `SELECT COUNT(*)::int AS total FROM campaigns c ${whereClause}`;
-  const countResult = await db.query(countQuery, params);
-  const total = countResult.rows[0]?.total || 0;
+  // Keyset (cursor) pagination for the hot sorts: a page is an index range
+  // scan on (sort value, id) instead of scanning and discarding OFFSET rows.
+  // Clients still paging with ?offset=N keep the legacy path.
+  const cursorParam = req.query.cursor;
+  const keyset = KEYSET_SORTS[sort] && (cursorParam !== undefined || offset === 0) ? KEYSET_SORTS[sort] : null;
+  if (cursorParam !== undefined && !keyset) {
+    return sendErrorResponse(res, 400, `cursor is only supported for sort=${Object.keys(KEYSET_SORTS).join(' or ')}`);
+  }
 
+  // The full count is only computed for the first page.
+  let total;
+  if (cursorParam === undefined) {
+    const countWhere = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+    const countResult = await db.query(`SELECT COUNT(*)::int AS total FROM campaigns c ${countWhere}`, params);
+    total = countResult.rows[0]?.total || 0;
+  }
+
+  if (keyset) {
+    if (cursorParam !== undefined) {
+      let cursor;
+      try {
+        cursor = decodeCursor(cursorParam, keyset.name);
+      } catch (err) {
+        return sendErrorResponse(res, 400, err.message, undefined, 'INVALID_CURSOR');
+      }
+      params.push(cursor.value, cursor.id);
+      filters.push(`(${keyset.column}, c.id) < ($${params.length - 1}::${keyset.cast}, $${params.length}::uuid)`);
+    }
+    const whereClause = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+    const { rows } = await db.query(
+      `SELECT c.*,
+              ${keyset.column}::text AS _cursor_value,
+              u.name AS creator_name,
+              u.kyc_status AS creator_kyc_status,
+              (SELECT COUNT(*)::int FROM campaign_updates cu WHERE cu.campaign_id = c.id) AS updates_count,
+              (SELECT COUNT(DISTINCT sender_public_key)::int FROM contributions con WHERE con.campaign_id = c.id) AS contributor_count
+         FROM campaigns c
+         JOIN users u ON u.id = c.creator_id
+         ${whereClause}
+        ORDER BY ${keyset.column} DESC, c.id DESC
+        LIMIT $${params.length + 1}`,
+      [...params, limit + 1]
+    );
+    const { page, nextCursor } = pageWithCursor(rows, limit, { sort: keyset.name });
+    return res.json({
+      ...(total !== undefined && { total }),
+      limit,
+      next_cursor: nextCursor,
+      campaigns: page,
+    });
+  }
+
+  const whereClause = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
   const sortExpressions = {
     newest: 'c.created_at DESC',
     ending_soon: 'c.deadline ASC NULLS LAST',
     most_funded: 'c.raised_amount DESC',
     most_backed: '(SELECT COUNT(*) FROM contributions ctr WHERE ctr.campaign_id = c.id) DESC',
     closest_to_goal: '(c.raised_amount / NULLIF(c.target_amount, 0)) DESC NULLS LAST, c.raised_amount DESC',
+    trending:
+      "(SELECT COUNT(*) FROM contributions ctr WHERE ctr.campaign_id = c.id AND ctr.created_at >= NOW() - INTERVAL '7 days') DESC, c.created_at DESC",
   };
-  const orderBy = sortExpressions[sort] || sortExpressions.newest;
+
+  // When a search query is present, order by relevance (ts_rank) first, then the selected sort.
+  // ts_rank requires a separate parameter reference to the tsquery.
+  let orderBy;
+  let queryParams;
+  if (searchParam) {
+    params.push(searchParam); // additional param for ts_rank
+    const rankParamIdx = params.length;
+    orderBy = `ts_rank(c.search_vector, plainto_tsquery('english', $${rankParamIdx})) DESC, ${sortExpressions[sort] || sortExpressions.newest}`;
+    queryParams = [...params, limit, offset];
+  } else {
+    orderBy = sortExpressions[sort] || sortExpressions.newest;
+    queryParams = [...params, limit, offset];
+  }
 
   const query = `
     SELECT c.*,
@@ -234,12 +404,14 @@ router.get('/', getCampaignsValidation, validateRequest, asyncHandler(async (req
     JOIN users u ON u.id = c.creator_id
     ${whereClause}
     ORDER BY ${orderBy}
-    LIMIT $${params.length + 1}
-    OFFSET $${params.length + 2}
+    LIMIT $${queryParams.length - 1}
+    OFFSET $${queryParams.length}
   `;
-  const result = await db.query(query, [...params, limit, offset]);
+  const result = await db.query(query, queryParams);
 
-  res.json({ total, limit, offset, campaigns: result.rows });
+  const payload = { total, limit, offset, campaigns: result.rows };
+  cache.set(cacheKey, payload, 30_000); // 30 s TTL
+  res.json(payload);
 }));
 
 router.get('/mine', requireAuth, asyncHandler(async (req, res) => {
@@ -247,9 +419,51 @@ router.get('/mine', requireAuth, asyncHandler(async (req, res) => {
   res.json(campaigns);
 }));
 
-router.get('/:id/milestones', asyncHandler(async (req, res) => {
+/**
+ * @openapi
+ * /api/campaigns/categories:
+ *   get:
+ *     tags: [Campaigns]
+ *     summary: List campaign categories with active campaign counts
+ *     responses:
+ *       200:
+ *         description: OK
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   category: { type: string }
+ *                   count: { type: integer }
+ */
+// Cached for 5 minutes — invalidated when a new campaign is created with a category.
+router.get('/categories', asyncHandler(async (req, res) => {
+  const CATEGORIES_CACHE_KEY = 'campaigns:categories';
+  const cached = cache.get(CATEGORIES_CACHE_KEY);
+  if (cached) return res.json(cached);
+
   const { rows } = await db.query(
-    `SELECT m.*, (c.milestones_contract_id IS NOT NULL) AS on_chain
+    `SELECT category, COUNT(*)::int AS count
+     FROM campaigns
+     WHERE deleted_at IS NULL
+       AND status NOT IN ('draft', 'failed')
+       AND category IS NOT NULL
+     GROUP BY category
+     ORDER BY count DESC, category ASC`
+  );
+
+  cache.set(CATEGORIES_CACHE_KEY, rows, 5 * 60 * 1000); // 5 min TTL
+  res.json(rows);
+}));
+
+router.get('/:id/milestones', asyncHandler(async (req, res) => {
+  if (!(await findVisibleCampaign(db, req.params.id))) {
+    return sendErrorResponse(res, 404, 'Campaign not found');
+  }
+  const { rows } = await db.query(
+    `SELECT m.*, (c.milestones_contract_id IS NOT NULL AND c.soroban_status = 'verified') AS on_chain
      FROM milestones m
      JOIN campaigns c ON c.id = m.campaign_id
      WHERE m.campaign_id = $1
@@ -264,11 +478,11 @@ router.post('/:id/milestones', requireAuth, requireCampaignMember('owner'), asyn
   try {
     normalizedMilestones = normalizeMilestonesInput(req.body?.milestones);
   } catch (err) {
-    return res.status(400).json({ error: err.message });
+    return sendErrorResponse(res, 400, err.message);
   }
 
   if (!normalizedMilestones.length) {
-    return res.status(400).json({ error: 'At least one milestone is required' });
+    return sendErrorResponse(res, 400, 'At least one milestone is required');
   }
 
   const client = await db.connect();
@@ -280,16 +494,16 @@ router.post('/:id/milestones', requireAuth, requireCampaignMember('owner'), asyn
     );
     if (!campaignRows.length) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Campaign not found' });
+      return sendErrorResponse(res, 404, 'Campaign not found');
     }
     const campaign = campaignRows[0];
     if (campaign.creator_id !== req.user.userId) {
       await client.query('ROLLBACK');
-      return res.status(403).json({ error: 'Only the campaign creator can define milestones' });
+      return sendErrorResponse(res, 403, 'Only the campaign creator can define milestones');
     }
     if (!['active', 'funded', 'in_progress'].includes(campaign.status)) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: `Milestones cannot be edited while campaign status is "${campaign.status}".` });
+      return sendErrorResponse(res, 409, `Milestones cannot be edited while campaign status is "${campaign.status}".`);
     }
 
     const { rows: existingRows } = await client.query(
@@ -298,7 +512,7 @@ router.post('/:id/milestones', requireAuth, requireCampaignMember('owner'), asyn
     );
     if (existingRows.some((row) => row.status !== 'pending')) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Milestone plan cannot be changed after approvals or releases begin' });
+      return sendErrorResponse(res, 409, 'Milestone plan cannot be changed after approvals or releases begin');
     }
 
     await client.query('DELETE FROM milestones WHERE campaign_id = $1', [campaign.id]);
@@ -324,10 +538,22 @@ router.post('/:id/milestones', requireAuth, requireCampaignMember('owner'), asyn
   } catch (err) {
     await client.query('ROLLBACK');
     logger.error('Campaign milestone plan update failed', { campaign_id: req.params.id, error: err.message });
-    res.status(500).json({ error: 'Could not save campaign milestones' });
+    sendErrorResponse(res, 500, 'Could not save campaign milestones');
   } finally {
     client.release();
   }
+}));
+
+// Get active campaign counts per category
+router.get('/categories', asyncHandler(async (req, res) => {
+  const { rows } = await db.query(`
+    SELECT category, COUNT(*)::int AS count
+    FROM campaigns
+    WHERE status = 'active' AND deleted_at IS NULL AND category IS NOT NULL
+    GROUP BY category
+    ORDER BY count DESC, category ASC
+  `);
+  res.json(rows);
 }));
 
 // Get single Campaign
@@ -365,24 +591,35 @@ router.get('/:id', asyncHandler(async (req, res) => {
    *       404:
    *         description: Not found
    */
+  // Only cache unauthenticated (public) requests — authenticated requests may
+  // include a user_role field that is user-specific and must not be shared.
+  const isAuthenticated = !!(req.headers.authorization);
+  const campaignCacheKey = `campaigns:id:${req.params.id}`;
+  if (!isAuthenticated) {
+    const cached = cache.get(campaignCacheKey);
+    if (cached) return res.json(cached);
+  }
+
   const query = `
     SELECT *,
            (SELECT COUNT(DISTINCT sender_public_key)::int FROM contributions WHERE campaign_id = $1) AS contributor_count
     FROM campaigns
     WHERE id = $1
   `;
-  await refreshCampaignStatus(req.params.id);
   const { rows } = await db.query(query, [req.params.id]);
-  if (!rows.length) return res.status(404).json({ error: 'Campaign not found' });
+  if (!rows.length) return sendErrorResponse(res, 404, 'Campaign not found');
   
   const campaign = rows[0];
   
   // Allow viewing suspended campaigns with a notice, but deleted campaigns are not accessible
   if (campaign.deleted_at) {
-    return res.status(404).json({ error: 'Campaign not found' });
+    return sendErrorResponse(res, 404, 'Campaign not found');
   }
   
   let userRole = null;
+  // Cumulative amount the authenticated caller has already contributed to this
+  // campaign (enforced via campaign.max_per_user). 0 for anonymous callers.
+  let userContributedAmount = 0;
 
   const header = req.headers.authorization;
   if (header && header.startsWith('Bearer ')) {
@@ -405,6 +642,22 @@ router.get('/:id', asyncHandler(async (req, res) => {
               userRole = memberRows[0].role;
             }
           }
+
+          // Return the caller's cumulative contribution for this campaign so the
+          // frontend can enforce the per-contributor cap from an authoritative total
+          // instead of summing a (possibly truncated) contributions list client-side.
+          const { rows: callerWalletRows } = await db.query(
+            'SELECT wallet_public_key FROM users WHERE id = $1',
+            [payload.userId]
+          );
+          const callerWalletPublicKey = callerWalletRows[0]?.wallet_public_key;
+          if (callerWalletPublicKey) {
+            const { rows: callerContributionRows } = await db.query(
+              `SELECT COALESCE(SUM(amount), 0) AS total FROM contributions WHERE campaign_id = $1 AND sender_public_key = $2`,
+              [req.params.id, callerWalletPublicKey]
+            );
+            userContributedAmount = Number(callerContributionRows[0]?.total ?? 0);
+          }
         }
       } catch (err) {
         // Ignore invalid token for public route
@@ -413,9 +666,15 @@ router.get('/:id', asyncHandler(async (req, res) => {
   }
 
   // Add notice if campaign is suspended
-  const response = { ...campaign, user_role: userRole };
+  const response = { ...campaign, user_role: userRole, user_contributed_amount: userContributedAmount };
   if (campaign.status === 'suspended') {
     response.suspended_notice = 'This campaign has been suspended and cannot receive new contributions';
+  }
+
+  // Cache only unauthenticated responses (no user-specific data) for 15 s.
+  // Invalidated by ledgerMonitor after each contribution is indexed.
+  if (!isAuthenticated) {
+    cache.set(campaignCacheKey, response, 15_000);
   }
 
   res.json(response);
@@ -432,10 +691,10 @@ router.get('/:id/embed', asyncHandler(async (req, res) => {
   const { rows } = await db.query(
     `SELECT id, title, description, target_amount, raised_amount, asset_type, status,
             (SELECT COUNT(*)::int FROM contributions c WHERE c.campaign_id = campaigns.id) AS backer_count
-     FROM campaigns WHERE id = $1`,
+     FROM campaigns WHERE id = $1 AND ${NOT_DELETED}`,
     [campaignId]
   );
-  if (!rows.length) return res.status(404).json({ error: 'Campaign not found' });
+  if (!rows.length) return sendErrorResponse(res, 404, 'Campaign not found');
 
   const campaign = rows[0];
   const pct = campaign.target_amount
@@ -457,32 +716,64 @@ router.get('/:id/embed', asyncHandler(async (req, res) => {
 }));
 
 // Get backers for a campaign
-router.get('/:id/backers', asyncHandler(async (req, res) => {
+router.get('/:id/backers', publicReadLimiter, optionalAuth, asyncHandler(async (req, res) => {
   const campaignId = req.params.id;
-  const { rows: campaignRows } = await db.query('SELECT show_backer_amounts FROM campaigns WHERE id = $1', [campaignId]);
-  if (!campaignRows.length) return res.status(404).json({ error: 'Campaign not found' });
-  const { show_backer_amounts } = campaignRows[0];
+  const { rows: campaignRows } = await db.query(
+    `SELECT show_backer_amounts, creator_id FROM campaigns WHERE id = $1 AND ${NOT_DELETED}`,
+    [campaignId]
+  );
+  if (!campaignRows.length) return sendErrorResponse(res, 404, 'Campaign not found');
+  const { show_backer_amounts, creator_id } = campaignRows[0];
 
-  const query = `
-    SELECT 
-      display_name,
-      sender_public_key,
-      ${show_backer_amounts ? 'amount,' : ''}
-      asset,
-      created_at
-    FROM contributions
-    WHERE campaign_id = $1
-    ORDER BY created_at DESC
-  `;
-  const { rows } = await db.query(query, [campaignId]);
-  res.json(rows);
+  // Determine if the requester is privileged (admin or campaign organizer)
+  const requestUserId = req.user?.userId;
+  const isAdmin = req.user?.is_admin === true;
+  const isOrganizer = requestUserId && (
+    requestUserId === creator_id ||
+    (await db.query(
+      `SELECT 1 FROM campaign_members WHERE campaign_id = $1 AND user_id = $2 AND accepted_at IS NOT NULL`,
+      [campaignId, requestUserId]
+    )).rows.length > 0
+  );
+  const isPrivileged = isAdmin || isOrganizer;
+
+  const { rows } = await db.query(
+    `SELECT
+       display_name,
+       sender_public_key,
+       ${show_backer_amounts ? 'amount,' : ''}
+       asset,
+       created_at,
+       wr.status AS refund_status,
+       wr.tx_hash AS refund_tx_hash
+     FROM contributions c
+     LEFT JOIN LATERAL (
+       SELECT status, tx_hash
+       FROM withdrawal_requests
+       WHERE contribution_id = c.id
+       ORDER BY created_at DESC
+       LIMIT 1
+     ) wr ON TRUE
+     WHERE c.campaign_id = $1
+     ORDER BY c.created_at DESC`,
+    [campaignId]
+  );
+
+  // Redact sensitive fields for non-privileged callers
+  const responseRows = rows.map((row) => {
+    if (isPrivileged) return row;
+    const { sender_public_key: _spk, refund_status: _rs, refund_tx_hash: _rth, ...publicRow } = row;
+    return publicRow;
+  });
+
+  res.json(responseRows);
 }));
 
 // SSE stream for real-time campaign funding updates
 router.get('/:id/stream', asyncHandler(async (req, res) => {
   const campaignId = parseInt(req.params.id, 10);
-  const { rows } = await db.query('SELECT id FROM campaigns WHERE id = $1', [campaignId]);
-  if (!rows.length) return res.status(404).json({ error: 'Campaign not found' });
+  const { rows } = await db.query(`SELECT id FROM campaigns WHERE id = $1 AND ${NOT_DELETED}`, [campaignId]);
+  if (!rows.length) return sendErrorResponse(res, 404, 'Campaign not found');
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -537,10 +828,10 @@ router.get('/:id/balance', asyncHandler(async (req, res) => {
    *         description: Campaign not found
    */
   const { rows } = await db.query(
-    'SELECT wallet_public_key FROM campaigns WHERE id = $1',
+    `SELECT wallet_public_key FROM campaigns WHERE id = $1 AND ${NOT_DELETED}`,
     [req.params.id]
   );
-  if (!rows.length) return res.status(404).json({ error: 'Campaign not found' });
+  if (!rows.length) return sendErrorResponse(res, 404, 'Campaign not found');
   const balance = await getCampaignBalance(rows[0].wallet_public_key);
   res.json(balance);
 }));
@@ -549,6 +840,42 @@ router.get('/:id/balance', asyncHandler(async (req, res) => {
 router.post('/cron/fail-expired', requireAuth, requireRole('admin'), asyncHandler(async (req, res) => {
   const { failed, funded } = await refreshActiveCampaignStatuses();
   res.json({ failedCampaigns: failed, fundedCampaigns: funded });
+}));
+
+// Authorized on-demand endpoint to refresh campaign status
+router.post('/:id/refresh-status', requireAuth, asyncHandler(async (req, res) => {
+  /**
+   * @openapi
+   * /api/campaigns/{id}/refresh-status:
+   *   post:
+   *     tags: [Campaigns]
+   *     summary: Refresh campaign status on demand (authorized)
+   *     parameters:
+   *       - in: path
+   *         name: id
+   *         required: true
+   *         schema: { type: string }
+   *     responses:
+   *       200:
+   *         description: Status refreshed
+   *       403:
+   *         description: Forbidden
+   *       404:
+   *         description: Not found
+   */
+  const { id } = req.params;
+  const { rows } = await db.query('SELECT creator_id, status FROM campaigns WHERE id = $1', [id]);
+  if (!rows.length) return sendErrorResponse(res, 404, 'Campaign not found');
+
+  const isOwner = rows[0].creator_id === req.user.userId;
+  const isAdmin = req.user.role === 'admin' || req.user.is_admin;
+  if (!isOwner && !isAdmin) {
+    return sendErrorResponse(res, 403, 'You do not have permission to refresh this campaign status');
+  }
+
+  const result = await refreshCampaignStatus(id);
+  const { rows: updatedRows } = await db.query('SELECT * FROM campaigns WHERE id = $1', [id]);
+  res.json({ campaign: updatedRows[0], statusResult: result });
 }));
 
 // Scheduled endpoint to send 48h deadline reminders
@@ -563,7 +890,7 @@ router.post('/cron/reminders', requireAuth, requireRole('admin'), asyncHandler(a
   );
 
   for (const campaign of rows) {
-    sendEmail({
+    sendEmailSafe({
       to: campaign.creator_email,
       subject: `Reminder: Campaign "${campaign.title}" ends in 48 hours`,
       text: `Your campaign "${campaign.title}" is approaching its deadline on ${new Date(campaign.deadline).toDateString()}. 
@@ -581,10 +908,10 @@ router.post('/:id/trigger-refunds', requireAuth, requireRole('admin'), asyncHand
     `SELECT id, wallet_public_key, status FROM campaigns WHERE id = $1`,
     [campaignId]
   );
-  if (!campaigns.length) return res.status(404).json({ error: 'Campaign not found' });
+  if (!campaigns.length) return sendErrorResponse(res, 404, 'Campaign not found');
   const campaign = campaigns[0];
   if (campaign.status !== 'failed') {
-    return res.status(409).json({ error: 'Refunds may only be triggered for failed campaigns' });
+    return sendErrorResponse(res, 409, 'Refunds may only be triggered for failed campaigns');
   }
 
   try {
@@ -595,12 +922,12 @@ router.post('/:id/trigger-refunds', requireAuth, requireRole('admin'), asyncHand
     res.status(201).json({ refundsCreated, refunds });
   } catch (err) {
     logger.error('Refund trigger failed', { campaign_id: campaignId, error: err.message });
-    res.status(500).json({ error: 'Could not trigger refunds for campaign' });
+    sendErrorResponse(res, 500, 'Could not trigger refunds for campaign');
   }
 }));
 
 // Create campaign (authenticated)
-router.post('/', requireAuth, requireRole('creator', 'admin'), createCampaignValidation, validateRequest, asyncHandler(async (req, res) => {
+router.post('/', requireAuth, requireRole('creator', 'admin'), idempotency, createCampaignValidation, validateRequest, asyncHandler(async (req, res) => {
   /**
    * @openapi
    * /api/campaigns:
@@ -633,28 +960,46 @@ router.post('/', requireAuth, requireRole('creator', 'admin'), createCampaignVal
    *       403:
    *         description: Forbidden
    */
-  const { title, description, target_amount, asset_type, deadline, milestones, min_contribution, max_contribution } = req.body;
+  const {
+    title,
+    description,
+    target_amount,
+    asset_type,
+    deadline,
+    milestones,
+    min_contribution,
+    max_contribution,
+    escrow_contract_id,
+    milestones_contract_id,
+  } = req.body;
+
+  if (isSorobanEnabled()) {
+    const contractIdError = validateContractIdsInput({ escrow_contract_id, milestones_contract_id });
+    if (contractIdError) {
+      return sendErrorResponse(res, 400, contractIdError, undefined, 'INVALID_CONTRACT_ID');
+    }
+  }
 
   let normalizedMilestones;
   try {
     normalizedMilestones = normalizeMilestonesInput(milestones);
   } catch (err) {
-    return res.status(400).json({ error: err.message });
+    return sendErrorResponse(res, 400, err.message);
   }
 
   // Get creator's info
   const { rows: userRows } = await db.query(
-    'SELECT email, wallet_public_key, kyc_status FROM users WHERE id = $1',
+    'SELECT email, wallet_public_key, kyc_status, email_verified FROM users WHERE id = $1',
     [req.user.userId]
   );
-  if (!userRows.length) return res.status(404).json({ error: 'User not found' });
-  
+  if (!userRows.length) return sendErrorResponse(res, 404, 'User not found');
+
+  if (!userRows[0].email_verified) {
+    return sendErrorResponse(res, 403, 'You must verify your email address before creating a campaign.', undefined, 'EMAIL_NOT_VERIFIED');
+  }
+
   if (isKycRequiredForCampaigns() && userRows[0].kyc_status !== 'verified') {
-    return res.status(403).json({
-      error: 'Verify your identity before creating a campaign.',
-      code: 'KYC_REQUIRED',
-      kyc_status: userRows[0].kyc_status,
-    });
+    return sendErrorResponse(res, 403, 'Verify your identity before creating a campaign.', undefined, 'KYC_REQUIRED', { kyc_status: userRows[0].kyc_status });
   }
 
   const creatorPublicKey = userRows[0].wallet_public_key;
@@ -663,22 +1008,19 @@ router.post('/', requireAuth, requireRole('creator', 'admin'), createCampaignVal
   // 1. Create the on-chain campaign wallet
   const wallet = await createCampaignWallet(creatorPublicKey);
 
-  // 2. Deploy/Instantiate Soroban Contracts (Mocking IDs for now, but preparing initialization)
-  const escrowContractId = "C" + crypto.randomBytes(24).toString('hex').toUpperCase();
-  const milestonesContractId = "C" + crypto.randomBytes(24).toString('hex').toUpperCase();
-
   const client = await db.connect();
   let campaign;
   try {
     await client.query('BEGIN');
     const { rows } = await client.query(
       `INSERT INTO campaigns
-         (title, description, target_amount, asset_type, wallet_public_key, creator_id, deadline, 
-          min_contribution, max_contribution, escrow_contract_id, milestones_contract_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         (title, description, target_amount, asset_type, wallet_public_key, wallet_secret_encrypted,
+          creator_id, deadline, min_contribution, max_contribution)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING *`,
-      [title, description, target_amount, asset_type, wallet.publicKey, req.user.userId, deadline, 
-       min_contribution || null, max_contribution || null, escrowContractId, milestonesContractId]
+      [title, description, target_amount, asset_type, wallet.publicKey,
+       encryptSecret(wallet.secret), req.user.userId, deadline,
+       min_contribution || null, max_contribution || null]
     );
     campaign = rows[0];
 
@@ -704,28 +1046,6 @@ router.post('/', requireAuth, requireRole('creator', 'admin'), createCampaignVal
       );
     }
 
-    // Soroban Initialization:
-    // In a real scenario, we would call the contracts here.
-    // milestones.initialize(creator, platform, escrow, milestones_vec)
-    /*
-    try {
-      const milestoneScVals = normalizedMilestones.map(m => encodeMilestone(m));
-      await invokeContract({
-        contractId: milestonesContractId,
-        method: 'initialize',
-        args: [
-          nativeToScVal(Address.fromString(creatorPublicKey)),
-          nativeToScVal(Address.fromString(process.env.PLATFORM_PUBLIC_KEY)),
-          nativeToScVal(Address.fromString(escrowContractId)),
-          nativeToScVal(milestoneScVals)
-        ],
-        signerSecret: process.env.PLATFORM_SECRET_KEY
-      });
-    } catch (err) {
-      logger.error('Soroban contract initialization failed', { error: err.message });
-    }
-    */
-
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -734,35 +1054,49 @@ router.post('/', requireAuth, requireRole('creator', 'admin'), createCampaignVal
       creatorUserId: req.user.userId,
       error: err.message,
     });
-    return res.status(500).json({
-      error: 'Campaign could not be saved. Wallet creation may have succeeded — contact support.',
-    });
+    return sendErrorResponse(res, 500, 'Campaign could not be saved. Wallet creation may have succeeded — contact support.');
   } finally {
     client.release();
   }
 
   watchCampaignWallet(campaign.id, wallet.publicKey);
 
+  // Invalidate the public campaign list and categories caches so the new campaign
+  // appears immediately on the next request.
+  cache.invalidatePrefix('campaigns:list:');
+  cache.invalidate('campaigns:categories');
+
+  // Contracts are deployed in the background; the campaign stays soroban_status='pending'
+  // (on_chain=false) until deploy + initialize + verification all succeed.
+  provisionSorobanContracts(campaign, creatorPublicKey, normalizedMilestones);
+
   res.status(201).json(campaign);
 }));
 
 // PATCH /campaigns/:id - Update campaign (title, description, deadline)
-router.patch('/:id', requireAuth, asyncHandler(async (req, res) => {
+router.patch('/:id', campaignBodyParser, requireAuth, requireCampaignMember('owner', 'manager'), asyncHandler(async (req, res) => {
   const campaignId = req.params.id;
-  const { title, description, deadline } = req.body;
+  const { title, description, deadline, escrow_contract_id, milestones_contract_id } = req.body;
 
-  // Check if campaign exists and belongs to user
+  if (isSorobanEnabled()) {
+    const contractIdError = validateContractIdsInput({ escrow_contract_id, milestones_contract_id });
+    if (contractIdError) {
+      return sendErrorResponse(res, 400, contractIdError, undefined, 'INVALID_CONTRACT_ID');
+    }
+  }
+
+  // Check if campaign exists
   const { rows: campaignRows } = await db.query(
     'SELECT * FROM campaigns WHERE id = $1',
     [campaignId]
   );
   if (!campaignRows.length) {
-    return res.status(404).json({ error: 'Campaign not found' });
+    return sendErrorResponse(res, 404, 'Campaign not found');
   }
 
   const campaign = campaignRows[0];
   if (campaign.creator_id !== req.user.userId) {
-    return res.status(403).json({ error: 'You do not have permission to edit this campaign' });
+    return sendErrorResponse(res, 403, 'You do not have permission to edit this campaign');
   }
 
   // Refresh campaign status to check current state
@@ -776,9 +1110,7 @@ router.patch('/:id', requireAuth, asyncHandler(async (req, res) => {
 
   // Only allow editing active or funded campaigns
   if (!['active', 'funded'].includes(currentStatus)) {
-    return res.status(422).json({
-      error: `Cannot edit a campaign with status: ${currentStatus}`
-    });
+    return sendErrorResponse(res, 422, `Cannot edit a campaign with status: ${currentStatus}`);
   }
 
   // Validate and prepare update object
@@ -789,10 +1121,10 @@ router.patch('/:id', requireAuth, asyncHandler(async (req, res) => {
   if (title !== undefined) {
     const cleanTitle = stripHtml(title);
     if (!cleanTitle) {
-      return res.status(422).json({ error: 'Title cannot be empty' });
+      return sendErrorResponse(res, 422, 'Title cannot be empty');
     }
     if (cleanTitle.length > 100) {
-      return res.status(422).json({ error: 'Title must be at most 100 characters' });
+      return sendErrorResponse(res, 422, 'Title must be at most 100 characters');
     }
     updates.title = cleanTitle;
     updateParams.push(['title', cleanTitle, `$${paramIndex++}`]);
@@ -801,7 +1133,7 @@ router.patch('/:id', requireAuth, asyncHandler(async (req, res) => {
   if (description !== undefined) {
     const cleanDesc = stripHtml(description);
     if (cleanDesc.length > 1000) {
-      return res.status(422).json({ error: 'Description must be at most 1000 characters' });
+      return sendErrorResponse(res, 422, 'Description must be at most 1000 characters');
     }
     updates.description = cleanDesc;
     updateParams.push(['description', cleanDesc, `$${paramIndex++}`]);
@@ -811,7 +1143,7 @@ router.patch('/:id', requireAuth, asyncHandler(async (req, res) => {
     // Validate ISO8601 format
     const deadlineDate = new Date(deadline);
     if (isNaN(deadlineDate.getTime())) {
-      return res.status(422).json({ error: 'Deadline must be a valid date' });
+      return sendErrorResponse(res, 422, 'Deadline must be a valid date');
     }
 
     // Check deadline is not in the past
@@ -820,25 +1152,33 @@ router.patch('/:id', requireAuth, asyncHandler(async (req, res) => {
     deadlineDate.setHours(0, 0, 0, 0);
 
     if (deadlineDate < today) {
-      return res.status(422).json({ error: 'Deadline cannot be in the past' });
+      return sendErrorResponse(res, 422, 'Deadline cannot be in the past');
     }
 
     updates.deadline = deadline;
     updateParams.push(['deadline', deadline, `$${paramIndex++}`]);
   }
 
+  if (escrow_contract_id !== undefined) {
+    updates.escrow_contract_id = escrow_contract_id || null;
+    updateParams.push(['escrow_contract_id', escrow_contract_id || null, `$${paramIndex++}`]);
+  }
+
+  if (milestones_contract_id !== undefined) {
+    updates.milestones_contract_id = milestones_contract_id || null;
+    updateParams.push(['milestones_contract_id', milestones_contract_id || null, `$${paramIndex++}`]);
+  }
+
   // Check if any valid updates were provided
   if (Object.keys(updates).length === 0) {
-    return res.status(400).json({ error: 'No valid fields to update' });
+    return sendErrorResponse(res, 400, 'No valid fields to update');
   }
 
   // Check for invalid fields in request body
-  const allowedFields = ['title', 'description', 'deadline'];
+  const allowedFields = ['title', 'description', 'deadline', 'escrow_contract_id', 'milestones_contract_id'];
   for (const field of Object.keys(req.body)) {
     if (!allowedFields.includes(field)) {
-      return res.status(422).json({
-        error: `Cannot update field: ${field}`
-      });
+      return sendErrorResponse(res, 422, `Cannot update field: ${field}`);
     }
   }
 
@@ -857,7 +1197,7 @@ router.patch('/:id', requireAuth, asyncHandler(async (req, res) => {
 
   const { rows: updatedRows } = await db.query(query, values);
   if (!updatedRows.length) {
-    return res.status(404).json({ error: 'Campaign not found' });
+    return sendErrorResponse(res, 404, 'Campaign not found');
   }
 
   res.json(updatedRows[0]);
@@ -870,12 +1210,8 @@ router.post(
   (req, res, next) => {
     upload.single('cover_image')(req, res, (err) => {
       if (err) {
-        return res.status(422).json({
-          error: {
-            code: 'VALIDATION_ERROR',
-            message: err.message || 'Invalid cover image upload',
-            fields: { cover_image: err.message || 'Invalid file' },
-          },
+        return sendErrorResponse(res, 422, err.message || 'Invalid cover image upload', {
+          cover_image: err.message || 'Invalid file',
         });
       }
       next();
@@ -883,12 +1219,8 @@ router.post(
   },
   async (req, res) => {
     if (!req.file) {
-      return res.status(422).json({
-        error: {
-          code: 'VALIDATION_ERROR',
-          message: 'cover_image is required',
-          fields: { cover_image: 'No image uploaded' },
-        },
+      return sendErrorResponse(res, 422, 'cover_image is required', {
+        cover_image: 'No image uploaded',
       });
     }
 
@@ -900,44 +1232,17 @@ router.post(
       );
       res.json(updatedRows[0]);
     } catch (err) {
-      return res.status(500).json({ error: 'Could not upload campaign cover image' });
+      return sendErrorResponse(res, 500, 'Could not upload campaign cover image');
     }
   }
 );
 
-router.get('/:id/updates', asyncHandler(async (req, res) => {
-  const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 10));
-  const offset = Math.max(0, Number(req.query.offset) || 0);
-  const { rows } = await db.query(
-    `SELECT cu.id, cu.campaign_id, cu.author_id, cu.title, cu.body, cu.created_at, u.name AS author_name
-     FROM campaign_updates cu
-     JOIN users u ON u.id = cu.author_id
-     WHERE cu.campaign_id = $1
-     ORDER BY cu.created_at DESC
-     LIMIT $2 OFFSET $3`,
-    [req.params.id, limit, offset]
-  );
-  res.json(rows);
-}));
-
-router.post('/:id/updates', requireAuth, requireCampaignMember('owner', 'manager'), createCampaignUpdateValidation, validateRequest, asyncHandler(async (req, res) => {
-  const { title, body } = req.body;
-
-  const { rows } = await db.query(
-    `INSERT INTO campaign_updates (campaign_id, author_id, title, body)
-     VALUES ($1, $2, $3, $4)
-     RETURNING id, campaign_id, author_id, title, body, created_at`,
-    [req.params.id, req.user.userId, title.trim(), body.trim()]
-  );
-  res.status(201).json(rows[0]);
-}));
-
 // POST /campaigns/:id/members — owner invites a user by email
 router.post('/:id/members', requireAuth, requireCampaignMember('owner'), asyncHandler(async (req, res) => {
   const { email, role } = req.body;
-  if (!email || !role) return res.status(422).json({ error: 'Email and role are required' });
+  if (!email || !role) return sendErrorResponse(res, 422, 'Email and role are required');
   if (!['owner', 'manager', 'viewer'].includes(role)) {
-    return res.status(422).json({ error: 'Invalid role. Must be owner, manager, or viewer' });
+    return sendErrorResponse(res, 422, 'Invalid role. Must be owner, manager, or viewer');
   }
 
   const { rows: users } = await db.query('SELECT id FROM users WHERE email = $1', [email.trim()]);
@@ -949,24 +1254,25 @@ router.post('/:id/members', requireAuth, requireCampaignMember('owner'), asyncHa
   );
   if (existing.length) {
     if (existing[0].accepted_at) {
-      return res.status(409).json({ error: 'User is already a member of this campaign' });
+      return sendErrorResponse(res, 409, 'User is already a member of this campaign');
     } else {
-      return res.status(409).json({ error: 'Invitation already sent to this user' });
+      return sendErrorResponse(res, 409, 'Invitation already sent to this user');
     }
   }
 
   const inviteToken = crypto.randomBytes(32).toString('hex');
+  const inviteExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
   const { rows: memberRows } = await db.query(
-    `INSERT INTO campaign_members (campaign_id, user_id, email, role, invited_by, invite_token)
-     VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO campaign_members (campaign_id, user_id, email, role, invited_by, invite_token, invite_expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
      RETURNING id, campaign_id, email, role, created_at`,
-    [req.params.id, inviteeUserId, email.trim(), role, req.user.userId, inviteToken]
+    [req.params.id, inviteeUserId, email.trim(), role, req.user.userId, inviteToken, inviteExpiresAt]
   );
 
   const campaignUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/campaigns/${req.params.id}/invite/${inviteToken}`;
   try {
-    await sendEmail({
+    await sendEmailSafe({
       to: email.trim(),
       subject: `Invitation to join campaign team`,
       text: `You have been invited to join a campaign as a ${role}. Click here to accept: ${campaignUrl}`,
@@ -999,7 +1305,7 @@ router.get('/:id/members', requireAuth, requireCampaignMember('owner'), asyncHan
 router.patch('/:id/members/:userId', requireAuth, requireCampaignMember('owner'), asyncHandler(async (req, res) => {
   const { role } = req.body;
   if (!role || !['owner', 'manager', 'viewer'].includes(role)) {
-    return res.status(422).json({ error: 'Invalid role. Must be owner, manager, or viewer' });
+    return sendErrorResponse(res, 422, 'Invalid role. Must be owner, manager, or viewer');
   }
 
   const { rows } = await db.query(
@@ -1011,7 +1317,7 @@ router.patch('/:id/members/:userId', requireAuth, requireCampaignMember('owner')
   );
 
   if (!rows.length) {
-    return res.status(404).json({ error: 'Member not found' });
+    return sendErrorResponse(res, 404, 'Member not found');
   }
 
   res.json(rows[0]);
@@ -1041,7 +1347,7 @@ router.delete('/:id/members/:userId', requireAuth, asyncHandler(async (req, res)
   }
 
   if (!isSelf && !isOwner) {
-    return res.status(403).json({ error: 'Insufficient permissions' });
+    return sendErrorResponse(res, 403, 'Insufficient permissions');
   }
 
   const { rows } = await db.query(
@@ -1052,7 +1358,7 @@ router.delete('/:id/members/:userId', requireAuth, asyncHandler(async (req, res)
   );
 
   if (!rows.length) {
-    return res.status(404).json({ error: 'Member not found' });
+    return sendErrorResponse(res, 404, 'Member not found');
   }
 
   res.json({ message: 'Member removed successfully' });
@@ -1061,19 +1367,40 @@ router.delete('/:id/members/:userId', requireAuth, asyncHandler(async (req, res)
 // POST /campaigns/:id/members/accept — accept invitation (token-based)
 router.post('/:id/members/accept', requireAuth, asyncHandler(async (req, res) => {
   const { token: inviteToken } = req.body;
-  if (!inviteToken) return res.status(422).json({ error: 'Invitation token is required' });
+  if (!inviteToken) return sendErrorResponse(res, 422, 'Invitation token is required');
 
   const { rows: invites } = await db.query(
-    `SELECT id, accepted_at, email FROM campaign_members
+    `SELECT id, accepted_at, email, invite_expires_at FROM campaign_members
      WHERE campaign_id = $1 AND invite_token = $2`,
     [req.params.id, inviteToken]
   );
 
   if (!invites.length) {
-    return res.status(404).json({ error: 'Invalid invitation token' });
+    return sendErrorResponse(res, 404, 'Invalid invitation token');
   }
   if (invites[0].accepted_at) {
-    return res.status(409).json({ error: 'Invitation already accepted' });
+    return sendErrorResponse(res, 409, 'Invitation already accepted');
+  }
+
+  // Check invite expiry
+  if (invites[0].invite_expires_at && new Date(invites[0].invite_expires_at) < new Date()) {
+    return sendErrorResponse(res, 410, 'Invitation has expired');
+  }
+
+  // Enforce identity binding: the accepting user must own the invited email address.
+  // Look up the current user's email from the DB — the JWT payload does not carry it.
+  const { rows: userRows } = await db.query(
+    'SELECT email FROM users WHERE id = $1',
+    [req.user.userId]
+  );
+  if (!userRows.length) {
+    return sendErrorResponse(res, 401, 'Authenticated user not found');
+  }
+  const currentUserEmail = userRows[0].email.toLowerCase().trim();
+  const invitedEmail = (invites[0].email || '').toLowerCase().trim();
+
+  if (!invitedEmail || currentUserEmail !== invitedEmail) {
+    return sendErrorResponse(res, 403, 'This invitation was sent to a different email address');
   }
 
   const { rows } = await db.query(
@@ -1088,7 +1415,12 @@ router.post('/:id/members/accept', requireAuth, asyncHandler(async (req, res) =>
 }));
 
 // GET /campaigns/:id/analytics — campaign analytics
-router.get('/:id/analytics', asyncHandler(async (req, res) => {
+router.get('/:id/analytics', requireAuth, asyncHandler(async (req, res) => {
+  const { rows: owner } = await db.query(`SELECT creator_id FROM campaigns WHERE id = $1 AND ${NOT_DELETED}`, [req.params.id]);
+  if (!owner.length) return sendErrorResponse(res, 404, 'Campaign not found');
+  if (owner[0].creator_id !== req.user.userId && req.user.role !== 'admin') {
+    return sendErrorResponse(res, 403, 'Not authorized to view analytics');
+  }
   const { rows: dailyTotals } = await db.query(`
     SELECT
       DATE(created_at) AS day,

@@ -462,46 +462,176 @@ async function withDecryptedWalletSecret(secret, contextInput, fn) {
   }
 }
 
-async function rotateLegacyUserWalletSecrets({ runner = db, dryRun = false } = {}) {
-  const { rows } = await runner.query(
-    'SELECT id, wallet_public_key, wallet_secret_encrypted FROM users ORDER BY created_at ASC, id ASC'
-  );
+const DEFAULT_ROTATION_BATCH_SIZE = 100;
 
-  let rotated = 0;
-  let alreadyEncrypted = 0;
-  let invalid = 0;
-
-  for (const row of rows) {
-    if (isEncryptedWalletSecret(row.wallet_secret_encrypted)) {
-      alreadyEncrypted += 1;
-      continue;
+/**
+ * Encrypts `plaintext` for the row and proves the result decrypts back to
+ * exactly the same bytes (constant-time compare) before anything is written.
+ * Throws if it does not; nothing is returned that has not round-tripped.
+ */
+async function encryptAndVerify(
+  plaintext,
+  context,
+  { encrypt = encryptWalletSecret, decrypt = decryptWalletSecretToBuffer } = {}
+) {
+  const ciphertext = await encrypt(plaintext, context);
+  const decrypted = await decrypt(ciphertext, context);
+  const original = Buffer.from(String(plaintext), 'utf8');
+  try {
+    if (decrypted.length !== original.length || !crypto.timingSafeEqual(decrypted, original)) {
+      throw new Error(`Rotation verification failed for user ${context.userId}: ciphertext does not decrypt to the original secret`);
     }
+  } finally {
+    decrypted.fill(0);
+    original.fill(0);
+  }
+  return ciphertext;
+}
 
-    if (!isLegacyPlaintextWalletSecret(row.wallet_secret_encrypted)) {
-      invalid += 1;
-      continue;
+/**
+ * Re-encrypts legacy plaintext wallet secrets with the configured provider.
+ *
+ * Safety properties (a bad rotation would permanently lose custodial keys):
+ * - every new ciphertext is decrypted and compared with the original
+ *   before it is written; any mismatch aborts the run;
+ * - rows are processed in keyset batches of `batchSize`, one transaction
+ *   per batch, so a failure rolls back only the current batch;
+ * - each rotated row's previous value is copied to wallet_secret_backups
+ *   (keyed by `runId`) in the same transaction as its update; this backup
+ *   is mandatory and cannot be skipped outside a dry run;
+ * - the UPDATE only applies if the row still holds the value that was read.
+ *
+ * In a dry run the same encrypt + verify happens but nothing is written.
+ */
+async function rotateLegacyUserWalletSecrets({
+  runner = db,
+  dryRun = false,
+  batchSize = DEFAULT_ROTATION_BATCH_SIZE,
+  runId = crypto.randomUUID(),
+  onBatch = () => {},
+  deps = undefined, // test seam for encryptAndVerify
+} = {}) {
+  validateWalletSecretConfig();
+  const limit = Math.max(1, Math.min(parseInt(batchSize, 10) || DEFAULT_ROTATION_BATCH_SIZE, 1000));
+  const result = {
+    run_id: dryRun ? null : runId,
+    total: 0,
+    rotated: 0,
+    verified: 0,
+    alreadyEncrypted: 0,
+    invalid: 0,
+    skippedChanged: 0,
+    batches: 0,
+  };
+
+  let cursor = null;
+  for (;;) {
+    const params = [];
+    let after = '';
+    if (cursor) {
+      params.push(cursor.createdAt, cursor.id);
+      after = 'WHERE (created_at, id) > ($1::timestamptz, $2::uuid)';
     }
+    params.push(limit);
+    const { rows } = await runner.query(
+      `SELECT id, wallet_public_key, wallet_secret_encrypted, created_at::text AS cursor_created_at
+       FROM users
+       ${after}
+       ORDER BY created_at ASC, id ASC
+       LIMIT $${params.length}`,
+      params
+    );
+    if (!rows.length) break;
+    result.total += rows.length;
+    result.batches += 1;
+    const last = rows[rows.length - 1];
+    cursor = { createdAt: last.cursor_created_at, id: last.id };
 
-    const encryptedSecret = await encryptWalletSecret(row.wallet_secret_encrypted, {
-      userId: row.id,
-      walletPublicKey: row.wallet_public_key,
-    });
-
-    if (!dryRun) {
-      await runner.query(
-        'UPDATE users SET wallet_secret_encrypted = $1 WHERE id = $2',
-        [encryptedSecret, row.id]
+    // Encrypt + verify the whole batch before opening a transaction.
+    const planned = [];
+    for (const row of rows) {
+      if (isEncryptedWalletSecret(row.wallet_secret_encrypted)) {
+        result.alreadyEncrypted += 1;
+        continue;
+      }
+      if (!isLegacyPlaintextWalletSecret(row.wallet_secret_encrypted)) {
+        result.invalid += 1;
+        continue;
+      }
+      const ciphertext = await encryptAndVerify(
+        row.wallet_secret_encrypted,
+        { userId: row.id, walletPublicKey: row.wallet_public_key },
+        deps
       );
+      result.verified += 1;
+      planned.push({ row, ciphertext });
     }
-    rotated += 1;
+
+    if (dryRun || !planned.length) {
+      if (dryRun) result.rotated += planned.length;
+      onBatch({ batch: result.batches, rows: rows.length, rotated: dryRun ? planned.length : 0 });
+      if (rows.length < limit) break;
+      continue;
+    }
+
+    const client = await runner.connect();
+    let rotatedInBatch = 0;
+    try {
+      await client.query('BEGIN');
+      for (const { row, ciphertext } of planned) {
+        const { rowCount } = await client.query(
+          `UPDATE users SET wallet_secret_encrypted = $1
+           WHERE id = $2 AND wallet_secret_encrypted = $3`,
+          [ciphertext, row.id, row.wallet_secret_encrypted]
+        );
+        if (!rowCount) {
+          // Changed since it was read (e.g. rotated concurrently); leave it.
+          result.skippedChanged += 1;
+          continue;
+        }
+        await client.query(
+          `INSERT INTO wallet_secret_backups (run_id, user_id, previous_value, rotated_value)
+           VALUES ($1, $2, $3, $4)`,
+          [runId, row.id, row.wallet_secret_encrypted, ciphertext]
+        );
+        rotatedInBatch += 1;
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+    result.rotated += rotatedInBatch;
+    onBatch({ batch: result.batches, rows: rows.length, rotated: rotatedInBatch });
+    if (rows.length < limit) break;
   }
 
-  return {
-    total: rows.length,
-    rotated,
-    alreadyEncrypted,
-    invalid,
-  };
+  return result;
+}
+
+/**
+ * Puts back the pre-rotation values recorded for `runId`, but only for rows
+ * that still hold the ciphertext that run wrote.
+ */
+async function restoreWalletSecretBackup(runId, { runner = db } = {}) {
+  const { rowCount } = await runner.query(
+    `UPDATE users u
+        SET wallet_secret_encrypted = b.previous_value
+       FROM wallet_secret_backups b
+      WHERE b.run_id = $1
+        AND b.user_id = u.id
+        AND u.wallet_secret_encrypted = b.rotated_value`,
+    [runId]
+  );
+  return { restored: rowCount };
+}
+
+/** Deletes a verified run's backup rows (they may contain plaintext secrets). */
+async function purgeWalletSecretBackup(runId, { runner = db } = {}) {
+  const { rowCount } = await runner.query('DELETE FROM wallet_secret_backups WHERE run_id = $1', [runId]);
+  return { purged: rowCount };
 }
 
 async function countLegacyPlaintextUserWalletSecrets({ runner = db } = {}) {
@@ -530,6 +660,8 @@ module.exports = {
   isEncryptedWalletSecret,
   isLegacyPlaintextWalletSecret,
   rotateLegacyUserWalletSecrets,
+  restoreWalletSecretBackup,
+  purgeWalletSecretBackup,
   validateWalletSecretConfig,
   withDecryptedWalletSecret,
 };

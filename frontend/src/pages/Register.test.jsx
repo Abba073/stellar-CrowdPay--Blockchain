@@ -3,6 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import Register from './Register';
+import { findUnlabeledControls } from '../test/a11y';
 
 const mockNavigate = vi.fn();
 const mockLogin = vi.fn();
@@ -36,6 +37,15 @@ describe('Register', () => {
     mockNavigate.mockClear();
     mockLogin.mockClear();
     api.register.mockReset();
+  });
+
+  it('gives every form control a programmatic label', () => {
+    const { container } = render(
+      <MemoryRouter>
+        <Register />
+      </MemoryRouter>
+    );
+    expect(findUnlabeledControls(container)).toEqual([]);
   });
 
   it('shows validation error for empty fields', async () => {

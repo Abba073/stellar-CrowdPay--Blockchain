@@ -1,100 +1,63 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const { STELLAR_NETWORKS } = require('./env');
 
-// Minimal stub so validateEnv can be loaded without real service dependencies.
-const Module = require('module');
-const _origLoad = Module._load;
-Module._load = function (request, parent, isMain) {
-  if (request === '../services/walletSecrets') {
-    return { validateWalletSecretConfig: () => {} };
-  }
-  return _origLoad.call(this, request, parent, isMain);
-};
+const BACKEND = path.join(__dirname, '..', '..');
 
-const { validateEnv } = require('./env');
-
-const REQUIRED_KEYS = [
-  'DATABASE_URL',
-  'JWT_SECRET',
-  'PLATFORM_SECRET_KEY',
-  'STELLAR_NETWORK',
-  'STELLAR_HORIZON_URL',
-];
-
-function withEnv(overrides, fn) {
-  const saved = {};
-  for (const key of REQUIRED_KEYS) {
-    saved[key] = process.env[key];
-  }
-  Object.assign(process.env, overrides);
-  try {
-    return fn();
-  } finally {
-    for (const key of REQUIRED_KEYS) {
-      if (saved[key] === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = saved[key];
-      }
-    }
-  }
-}
-
-const VALID_ENV = {
-  DATABASE_URL: 'postgres://localhost/test',
-  JWT_SECRET: 'supersecret',
-  PLATFORM_SECRET_KEY: 'platformkey',
+// A minimal, valid testnet environment (values match the npm test script).
+const BASE_ENV = {
+  PATH: process.env.PATH,
+  NODE_ENV: 'test',
+  DATABASE_URL: 'postgresql://postgres:password@localhost:5432/crowdpay',
+  JWT_SECRET: 'testsecret',
+  API_KEY_PEPPER: 'test-api-key-pepper',
+  PLATFORM_SECRET_KEY: 'SCVMQUS5EMTHWBLJTE5XCSCMHB2ZOVKRR4ATVTRPUNRCOGKRENIL3LHR',
   STELLAR_NETWORK: 'testnet',
   STELLAR_HORIZON_URL: 'https://horizon-testnet.stellar.org',
+  USDC_ISSUER: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+  WALLET_SECRET_LOCAL_KEK: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
 };
 
-test('validateEnv passes when all required vars are set', () => {
-  withEnv(VALID_ENV, () => {
-    assert.doesNotThrow(() => validateEnv());
+// validateEnv() calls process.exit on failure, so run it in a child process.
+function runValidateEnv(overrides = {}) {
+  const script = "require('./src/config/env').validateEnv(); console.log('ENV_OK');";
+  return spawnSync(process.execPath, ['-e', script], {
+    cwd: BACKEND,
+    env: { ...BASE_ENV, ...overrides },
+    encoding: 'utf8',
   });
+}
+
+test('STELLAR_NETWORK accepts only testnet and mainnet', () => {
+  assert.deepEqual(STELLAR_NETWORKS, ['testnet', 'mainnet']);
 });
 
-test('whitespace-only JWT_SECRET is treated as missing', () => {
-  const originalExit = process.exit;
-  let exitCode;
-  process.exit = (code) => { exitCode = code; throw new Error('process.exit'); };
-
-  try {
-    withEnv({ ...VALID_ENV, JWT_SECRET: '   ' }, () => {
-      assert.throws(() => validateEnv(), /process\.exit/);
-    });
-    assert.equal(exitCode, 1);
-  } finally {
-    process.exit = originalExit;
-  }
+test('validateEnv accepts STELLAR_NETWORK=testnet', () => {
+  const result = runValidateEnv({ STELLAR_NETWORK: 'testnet' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /ENV_OK/);
 });
 
-test('whitespace-only PLATFORM_SECRET_KEY is treated as missing', () => {
-  const originalExit = process.exit;
-  let exitCode;
-  process.exit = (code) => { exitCode = code; throw new Error('process.exit'); };
-
-  try {
-    withEnv({ ...VALID_ENV, PLATFORM_SECRET_KEY: '\t' }, () => {
-      assert.throws(() => validateEnv(), /process\.exit/);
-    });
-    assert.equal(exitCode, 1);
-  } finally {
-    process.exit = originalExit;
-  }
+test('validateEnv accepts STELLAR_NETWORK=mainnet with non-default secrets', () => {
+  const result = runValidateEnv({
+    STELLAR_NETWORK: 'mainnet',
+    STELLAR_HORIZON_URL: 'https://horizon.stellar.org',
+    JWT_SECRET: 'a-real-jwt-secret',
+    API_KEY_PEPPER: 'a-real-pepper',
+    PLATFORM_SECRET_KEY: 'SBPQUZ6G4FZNWFHKUWC5BEYWF6R52E3SEP7R3GWYSM2XTKGF5LNTWW4R',
+    WALLET_SECRET_LOCAL_KEK: 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /ENV_OK/);
 });
 
-test('whitespace-only DATABASE_URL is treated as missing', () => {
-  const originalExit = process.exit;
-  let exitCode;
-  process.exit = (code) => { exitCode = code; throw new Error('process.exit'); };
-
-  try {
-    withEnv({ ...VALID_ENV, DATABASE_URL: '  \n  ' }, () => {
-      assert.throws(() => validateEnv(), /process\.exit/);
-    });
-    assert.equal(exitCode, 1);
-  } finally {
-    process.exit = originalExit;
-  }
-});
+for (const value of ['MAINNET', 'Mainnet', 'TESTNET', 'main', 'public', 'futurenet', ' mainnet', 'mainnet ']) {
+  test(`validateEnv refuses to start with STELLAR_NETWORK=${JSON.stringify(value)}`, () => {
+    const result = runValidateEnv({ STELLAR_NETWORK: value });
+    assert.equal(result.status, 1, `expected startup failure for ${JSON.stringify(value)}`);
+    assert.match(result.stderr, /Cannot start: invalid STELLAR_NETWORK/);
+    assert.doesNotMatch(result.stdout, /ENV_OK/);
+  });
+}

@@ -1,8 +1,61 @@
 # CrowdPay Backend API
 
+> **Generated file — do not edit by hand.**
+> The swagger-jsdoc annotations in `src/routes/*.js` are the single source of
+> truth for the HTTP API. This file is generated from that spec by
+> `npm run docs:api` (`scripts/generate-api-docs.js`). CI runs
+> `npm run docs:api:check`, which regenerates the file and fails when the
+> committed copy differs, so any route change must be accompanied by the
+> regenerated `API.md`.
+
+The [route table](#route-table) is derived from the same spec and must match the
+routers mounted in `src/index.js` exactly: `src/routes/apiDocs.test.js` fails
+when a route is added, removed or renamed without updating the annotations (and
+when a `###` heading below names a route that does not exist).
+
 ## Interactive Swagger UI
 
-In development, browse the interactive API docs at `GET /api/docs`.
+Browse the interactive API docs at `GET /api/docs` (served from the same spec).
+
+## Conventions
+
+- **Base path**: every JSON route lives under `/api`, except `GET /health` and `GET /health/ledger`.
+- **Authentication**: `POST /api/auth/login` and `POST /api/auth/register` set an httpOnly `cp_token`
+  cookie (plus a refresh cookie used by `POST /api/auth/refresh`, named `__Host-cp_refresh` in production
+  and `cp_refresh_token` elsewhere). Browser clients send the
+  cookie with `credentials: "include"`. Server-to-server clients may instead send
+  `Authorization: Bearer <token>`, where the token is either the access token or a `cp_live_…` API key
+  from `POST /api/api-keys`.
+- **Errors**: every non-2xx response has the same envelope:
+
+  ```json
+  { "error": { "code": "VALIDATION_ERROR", "message": "Human-readable message", "fields": { "amount": "Invalid amount" } } }
+  ```
+
+  `code` is always present: by default it is derived from the status (`BAD_REQUEST`, `UNAUTHORIZED`,
+  `FORBIDDEN`, `NOT_FOUND`, `CONFLICT`, `VALIDATION_ERROR` (422), `TOO_MANY_REQUESTS`,
+  `INTERNAL_ERROR`, `BAD_GATEWAY`, `SERVICE_UNAVAILABLE`), and some endpoints use a more specific one
+  (e.g. `KYC_REQUIRED`). `fields` is present for field-level validation errors. A few endpoints add
+  top-level hints next to `error` (e.g. `retryable`, `retry_after_ms`, `retry_after_seconds`).
+  Request-validation failures (`400 VALIDATION_ERROR`) also keep the raw `errors` array.
+- **Idempotency**: `POST /api/campaigns`, `POST /api/contributions/submit-signed`,
+  `POST /api/withdrawals/request` and `POST /api/milestones/:id/release` (and its `/approve` alias)
+  accept an optional `Idempotency-Key` header (max 255 chars). A repeated key with the same body
+  returns the original 2xx response with `Idempotent-Replayed: true`; a different body returns `422`,
+  and a request still in progress returns `409`.
+
+Auth column in the table:
+
+| Value | Meaning |
+|---|---|
+| Public | No credentials required |
+| Optional | Works anonymously; more fields for the owner/admin |
+| User | Any authenticated user (additional ownership checks noted per route) |
+| Owner | Authenticated campaign owner (or member role noted) |
+| Admin | `role=admin` |
+| Super admin | `is_super_admin=true` |
+| Platform | The configured `PLATFORM_APPROVER_USER_ID` (any user in dev when unset) |
+| Signed | Provider HMAC signature, no user session |
 
 ## Contribution conversion model
 
@@ -12,22 +65,212 @@ In development, browse the interactive API docs at `GET /api/docs`.
 - Conversion path discovery uses Stellar Horizon `strictReceivePaths` and applies a `5%` slippage buffer when computing `sendMax`.
 - Additional credit assets can be enabled through `STELLAR_EXTRA_ASSETS` in `.env` as a JSON object (`{"CODE":"ISSUER"}`).
 
-## Endpoints
+
+## Route table
+
+Deprecated aliases still respond but will be removed; new integrations must use the canonical route.
+
+### Auth
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| `POST` | `/api/auth/register` | Public | Rate-limited. Creates user + custodial wallet, sets session cookies |
+| `POST` | `/api/auth/login` | Public | Rate-limited. Sets session cookies |
+| `POST` | `/api/auth/refresh` | Public | Rotates the refresh cookie and issues a new access token |
+| `POST` | `/api/auth/logout` | Public | Revokes the refresh token and clears cookies |
+| `POST` | `/api/auth/verify-email` | Public | Body `{ token }` |
+| `POST` | `/api/auth/resend-verification` | User | Rate-limited (3/hour) |
+| `POST` | `/api/auth/forgot-password` | Public | Always `200` to avoid account enumeration |
+| `POST` | `/api/auth/reset-password` | Public | Body `{ token, password }` |
+
+### Users
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| `GET` | `/api/users/me` | User | Current profile |
+| `PATCH` | `/api/users/me` | User | Update display `name` only |
+| `POST` | `/api/users/me/kyc/start` | User | Start hosted KYC session |
+| `GET` | `/api/users/me/campaigns` | User | **Deprecated** alias of `GET /api/campaigns/mine` |
+| `GET` | `/api/users/me/stats` | User | Dashboard totals |
+| `GET` | `/api/users/me/balance` | User | Custodial wallet balances |
+| `GET` | `/api/users/me/contributions` | User | **Deprecated** alias of `GET /api/contributions/mine` |
+
+### Campaigns
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| `GET` | `/api/campaigns` | Public | List/search with filters. Paginate with `limit` + `cursor` (`next_cursor` from the previous page) for `sort=newest` / `most_funded`; `offset` still works but is slower on deep pages |
+| `POST` | `/api/campaigns` | User | Creator/admin; requires verified email (and KYC when enforced) |
+| `GET` | `/api/campaigns/mine` | User | Campaigns the user created |
+| `GET` | `/api/campaigns/categories` | Public | |
+| `GET` | `/api/campaigns/featured` | Public | |
+| `GET` | `/api/campaigns/:id` | Public | |
+| `PATCH` | `/api/campaigns/:id` | User | Campaign creator only; title, description, deadline |
+| `POST` | `/api/campaigns/:id/cover-image` | Owner | Multipart upload; requires `STORAGE_*` config |
+| `GET` | `/api/campaigns/:id/embed` | Public | CORS-enabled widget payload |
+| `GET` | `/api/campaigns/:id/backers` | Optional | |
+| `GET` | `/api/campaigns/:id/stream` | Public | Server-sent events for live funding updates |
+| `GET` | `/api/campaigns/:id/balance` | Public | On-chain campaign wallet balances |
+| `GET` | `/api/campaigns/:id/analytics` | User | Owner or admin only |
+| `POST` | `/api/campaigns/:id/refresh-status` | User | Re-evaluate funded/failed status |
+| `POST` | `/api/campaigns/:id/trigger-refunds` | Admin | |
+| `POST` | `/api/campaigns/cron/fail-expired` | Admin | Manual trigger for the expiry job |
+| `POST` | `/api/campaigns/cron/reminders` | Admin | Manual trigger for deadline reminders |
+| `GET` | `/api/campaigns/:id/milestones` | Public | |
+| `POST` | `/api/campaigns/:id/milestones` | Owner | Replace the milestone plan |
+| `GET` | `/api/campaigns/:id/updates` | Public | `limit` (1-100, default 20), `offset` (default 0); returns `{ updates, limit, offset }` |
+| `POST` | `/api/campaigns/:id/updates` | Owner | Campaign creator only |
+| `PATCH` | `/api/campaigns/:id/updates/:updateId` | Owner | Campaign creator only |
+| `DELETE` | `/api/campaigns/:id/updates/:updateId` | Owner | Campaign creator only |
+| `GET` | `/api/campaigns/:id/members` | Owner | |
+| `POST` | `/api/campaigns/:id/members` | Owner | Invite by email |
+| `PATCH` | `/api/campaigns/:id/members/:userId` | Owner | Change a member's role |
+| `DELETE` | `/api/campaigns/:id/members/:userId` | User | Owner removes a member, or a member leaves |
+| `POST` | `/api/campaigns/:id/members/accept` | User | Accept an invitation |
+| `POST` | `/api/campaigns/:id/disputes` | User | Contributors raise a dispute |
+| `GET` | `/api/campaigns/:id/disputes` | User | |
+
+### Contributions
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| `POST` | `/api/contributions` | User | Custodial contribution (direct or path payment) |
+| `GET` | `/api/contributions/quote` | User | DEX quote for cross-asset contributions |
+| `POST` | `/api/contributions/prepare` | User | Unsigned XDR for Freighter signing |
+| `POST` | `/api/contributions/submit-signed` | User | Submit Freighter-signed XDR |
+| `GET` | `/api/contributions/finalization/:txHash` | User | Submitted vs. ledger-indexed status |
+| `GET` | `/api/contributions/campaign/:campaignId` | Optional | Sensitive fields redacted for anonymous callers |
+| `GET` | `/api/contributions/mine` | User | The caller's contributions |
+| `GET` | `/api/contributions` | User | **Deprecated** alias of `GET /api/contributions/mine` |
+
+### Anchor (SEP-24 fiat on-ramp)
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| `GET` | `/api/anchor/info` | Public | Configured anchors and enabled asset codes |
+| `GET` | `/api/anchor/sep24/assets` | Public | Anchors available for wallet top-ups |
+| `POST` | `/api/anchor/deposits/start` | User | Deposit that ends in a campaign contribution |
+| `POST` | `/api/anchor/sep24/deposit` | User | Deposit into the user's own custodial wallet |
+| `GET` | `/api/anchor/deposits/:id` | User | Poll a deposit session |
+
+### Withdrawals (manual fund release)
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| `GET` | `/api/withdrawals/capabilities` | User | |
+| `POST` | `/api/withdrawals/request` | User | Campaign creator only |
+| `GET` | `/api/withdrawals/campaign/:campaignId` | User | Creator or platform approver |
+| `GET` | `/api/withdrawals/:id` | User | Creator or platform approver; includes `unsigned_xdr` |
+| `POST` | `/api/withdrawals/:id/approve/creator` | User | Campaign creator only |
+| `POST` | `/api/withdrawals/:id/approve/platform` | Platform | |
+| `POST` | `/api/withdrawals/:id/approve` | Platform | **Deprecated** alias of `POST /api/withdrawals/:id/approve/platform` |
+| `POST` | `/api/withdrawals/:id/cancel` | User | Campaign creator only, before signing |
+| `POST` | `/api/withdrawals/:id/reject` | Platform | |
+| `GET` | `/api/withdrawals/:id/events` | User | Creator or platform approver |
+| `GET` | `/api/withdrawals/:id/audit` | User | **Deprecated** alias of `GET /api/withdrawals/:id/events` |
+
+### Milestones
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| `GET` | `/api/milestones/campaign/:campaignId` | Public | |
+| `POST` | `/api/milestones` | User | Campaign creator only |
+| `POST` | `/api/milestones/:id/submit` | User | Campaign creator only |
+| `POST` | `/api/milestones/:id/release` | User | Platform approver only |
+| `POST` | `/api/milestones/:id/approve` | User | **Deprecated** alias of `POST /api/milestones/:id/release` |
+| `POST` | `/api/milestones/:id/reject` | User | Platform approver only |
+
+### Disputes
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| `PATCH` | `/api/disputes/:id` | Admin | Change status / add resolution note |
+| `GET` | `/api/disputes/:id/events` | User | |
+
+### Stellar transactions
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| `GET` | `/api/stellar/transactions` | User | |
+| `GET` | `/api/stellar/transactions/:id` | User | |
+
+### Admin
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| `GET` | `/api/admin/stats` | Admin | |
+| `GET` | `/api/admin/metrics/db-pool` | Admin | Database pool total/idle/waiting counts |
+| `GET` | `/api/admin/campaigns` | Admin | |
+| `GET` | `/api/admin/campaigns/deleted` | Admin | |
+| `PATCH` | `/api/admin/campaigns/:id/suspend` | Admin | |
+| `PATCH` | `/api/admin/campaigns/:id/restore` | Admin | |
+| `PATCH` | `/api/admin/campaigns/:id/feature` | Admin | |
+| `PATCH` | `/api/admin/campaigns/:id/unfeature` | Admin | |
+| `DELETE` | `/api/admin/campaigns/:id` | Admin | Soft delete |
+| `POST` | `/api/admin/campaigns/:id/reconcile` | Admin | Reconcile raised amount against the ledger |
+| `GET` | `/api/admin/users` | Admin | |
+| `PATCH` | `/api/admin/users/:id/ban` | Admin | |
+| `PATCH` | `/api/admin/users/:id/unban` | Admin | |
+| `PATCH` | `/api/admin/users/:id/promote` | Super admin | |
+| `PATCH` | `/api/admin/users/:id/demote` | Super admin | |
+| `GET` | `/api/admin/audit-log` | Admin | `limit` max 100; pass `pagination.next_before_id` as `before_id` for the next page |
+| `GET` | `/api/admin/milestones` | Admin | |
+
+### Developer: API keys and webhooks
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| `GET` | `/api/api-keys` | User | |
+| `POST` | `/api/api-keys` | User | Raw key is returned once |
+| `DELETE` | `/api/api-keys/:id` | User | |
+| `GET` | `/api/webhooks` | User | |
+| `POST` | `/api/webhooks` | User | |
+| `DELETE` | `/api/webhooks/:id` | User | |
+| `GET` | `/api/webhooks/deliveries` | User | |
+| `POST` | `/api/webhooks/kyc` | Signed | KYC provider callback |
+| `POST` | `/api/webhooks/email-events` | Token | Email provider bounce/complaint events; suppresses the address |
+
+### Notifications
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| `GET` | `/api/notifications` | User | |
+| `PATCH` | `/api/notifications/read-all` | User | |
+| `PATCH` | `/api/notifications/:id/read` | User | |
+
+### Platform
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| `GET` | `/api/config` | Public | `{ platform_fee_bps }` |
+| `GET` | `/api/stats` | Public | Landing-page totals (cached 60 s) |
+| `GET` | `/api/seo/head` | Public | HTML head fragment for campaign pages, injected by nginx SSI so crawlers see per-campaign `og:*`/`twitter:*` tags (cached 60 s) |
+| `GET` | `/health` | Public | Liveness + database connectivity; returns `{ "status": "ok" }` |
+| `GET` | `/health/ledger` | Public | Horizon stream health |
+
+### Removed
+
+- `POST /api/users/register` and `POST /api/users/login` (and every other `/api/users/*` copy of the auth
+  router) were undocumented duplicates of `/api/auth/*`. No client used them, so they have been removed. Use `/api/auth/*`.
+
+## Endpoint details
 
 ### `GET /api/users/me`
 
-Authenticated. Returns the current profile, including `email_verified` (boolean), `kyc_status` (`unverified`, `pending`, `verified`, `rejected`) and `kyc_completed_at`.
+Authenticated. Returns the current profile: `id`, `email`, `name`, `wallet_public_key`, `wallet_type`, `role`,
+`kyc_status` (`unverified`, `pending`, `verified`, `rejected`), `kyc_completed_at`, `created_at`, and
+`kyc_required_for_campaigns` (boolean, from `KYC_REQUIRED_FOR_CAMPAIGNS`).
 
-### `GET /api/users/verify-email`
+### `POST /api/auth/verify-email`
 
 Public. Validates a verification token and marks the associated user's email as verified.
 
-Query params:
-- `token` (required): The UUID token sent via email.
+Body:
+- `token` (required): the token from the verification email link.
 
-Returns `200` on success or `400/410` if the token is invalid or expired (> 24 hours).
+Returns `200` on success (including when the email was already verified), or `400` if the token is missing, invalid or expired (> 24 hours).
 
-### `POST /api/users/resend-verification`
+### `POST /api/auth/resend-verification`
 
 Authenticated. Generates a new verification token and sends a new email.
 Rate-limited to 3 requests per hour per user.
@@ -213,12 +456,21 @@ For a custom anchor, configure `ANCHOR_CUSTOM_ID`, `ANCHOR_CUSTOM_NAME`, `ANCHOR
 
 ### `GET /api/contributions/campaign/:campaignId`
 
-Fetch indexed contributions with conversion audit fields.
+Fetch indexed contributions with conversion audit fields, newest first.
+
+Query params: `limit` (default 20, max 100) and `cursor` (the `next_cursor` of the previous
+page). Cursor pages are index range scans, so deep pages stay fast. `offset` is still accepted
+for older clients (the response then echoes `offset` and `next_cursor` is `null`). `total` is
+only returned on the first page.
 
 Success response (`200`):
 
 ```json
-[
+{
+  "total": 128,
+  "limit": 20,
+  "next_cursor": "eyJzIjoiY29udHJpYnV0aW9uc19uZXdlc3QiLCJ2Ijoi...",
+  "contributions": [
   {
     "id": "0f3f...",
     "sender_public_key": "G...",
@@ -232,8 +484,11 @@ Success response (`200`):
     "tx_hash": "c8d6...",
     "created_at": "2026-04-23T08:13:34.392Z"
   }
-]
+  ]
+}
 ```
+
+`sender_public_key` and refund fields are only included for admins and campaign members.
 
 ### `GET /api/withdrawals/capabilities`
 
@@ -272,7 +527,7 @@ Logs `creator_signed` in `withdrawal_approval_events`.
 
 ### `POST /api/withdrawals/:id/approve/platform`
 
-Platform approval/finalization step. Signs with platform key, validates dual-signature presence, and submits to Stellar.
+Platform approval/finalization step. `POST /api/withdrawals/:id/approve` is a deprecated alias. Signs with platform key, validates dual-signature presence, and submits to Stellar.
 
 Errors:
 
@@ -301,7 +556,17 @@ List withdrawal requests for a campaign (`denial_reason` included when denied). 
 
 ### `GET /api/withdrawals/:id/events`
 
-Immutable audit timeline for one withdrawal: `action`, `actor_user_id`, `note`, `metadata`, `created_at`. Same authorization as the campaign list endpoint.
+`GET /api/withdrawals/:id/audit` is a deprecated alias. Immutable audit timeline for one withdrawal: `action`, `actor_user_id`, `note`, `metadata`, `created_at`. Same authorization as the campaign list endpoint.
+
+### `GET /api/campaigns/:id/embed`
+
+Public, CORS-enabled campaign payload for iframe embeds. The campaign ID is a UUID and must be passed unchanged. Returns campaign title, description, amounts, asset, status, progress percentage, contributor count, and a contribution URL.
+
+The embeddable widget polls this endpoint every 30 seconds. Use `GET /api/campaigns/:id/stream` for live SSE updates.
+
+### `GET /api/campaigns/:id/analytics`
+
+Contribution analytics for the last 30 days, **restricted to the campaign owner or an admin** (others receive `403`). Returns `dailyTotals`, `assetBreakdown`, and `topContributors`. Deleted or unknown campaigns return `404`.
 
 ### `GET /api/milestones/campaign/:campaignId`
 
@@ -345,9 +610,9 @@ Errors:
 - `409` campaign is not yet in a releaseable state, or milestone is already released
 - `400` destination key is invalid
 
-### `POST /api/milestones/:id/approve`
+### `POST /api/milestones/:id/release`
 
-Platform-only. Reviews the submitted milestone, signs the escrow withdrawal using the existing dual-signature flow, submits it to Stellar, records the withdrawal, and advances campaign status to `in_progress` or `completed`.
+Platform-only. `POST /api/milestones/:id/approve` is a deprecated alias. Reviews the submitted milestone, signs the escrow withdrawal using the existing dual-signature flow, submits it to Stellar, records the withdrawal, and advances campaign status to `in_progress` or `completed`.
 
 Body:
 
@@ -395,14 +660,5 @@ The backend also logs a **warning** every 5 minutes if any wallet is in that sta
 
 ## Test coverage
 
-`node --test src/**/*.test.js` includes route coverage for:
-
-- quote endpoint success
-- quote endpoint no-path behavior
-- direct payment path for `XLM -> XLM`
-- direct payment path for `USDC -> USDC`
-- conversion path payment for `XLM -> USDC`
-- conversion path payment for `USDC -> XLM`
-- withdrawal request creation with multisig validation
-- withdrawal creator/platform approval flow
-- withdrawal denial paths (missing creator approval, insufficient signatures)
+Route behaviour is covered by the `src/routes/*.test.js` suites (`npm test`). `src/routes/apiDocs.test.js`
+checks that the route table above matches the mounted routers.

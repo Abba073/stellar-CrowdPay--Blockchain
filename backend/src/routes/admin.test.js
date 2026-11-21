@@ -242,4 +242,47 @@ describe('Admin Moderation Features', async () => {
       assert.ok(Array.isArray(data.campaign_status));
     });
   });
+
+  describe('Deleted Campaign Management', () => {
+    it('admin can list deleted campaigns', async () => {
+      const res = await fetch('http://localhost:3000/api/admin/campaigns/deleted', {
+        headers: { 'Authorization': `Bearer ${adminToken}` }
+      });
+      assert.strictEqual(res.status, 200);
+      const data = await res.json();
+      assert.ok(Array.isArray(data));
+    });
+
+    it('admin can restore a soft-deleted campaign', async () => {
+      // First soft-delete the campaign
+      await fetch(`http://localhost:3000/api/admin/campaigns/${campaignId}`, {
+        method: 'DELETE',
+        headers: { 
+          'Authorization': `Bearer ${adminToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ reason: 'Test deletion' })
+      });
+
+      // Restore the campaign
+      const res = await fetch(`http://localhost:3000/api/admin/campaigns/${campaignId}/restore`, {
+        method: 'PATCH',
+        headers: { 'Authorization': `Bearer ${adminToken}` }
+      });
+      assert.strictEqual(res.status, 200);
+      const data = await res.json();
+      assert.strictEqual(data.message, 'Campaign restored from deleted');
+      assert.ok(data.campaign.deleted_at === null);
+      assert.strictEqual(data.campaign.status, 'active');
+    });
+
+    it('restore endpoint handles non-existent campaign', async () => {
+      const fakeId = 999999;
+      const res = await fetch(`http://localhost:3000/api/admin/campaigns/${fakeId}/restore`, {
+        method: 'PATCH',
+        headers: { 'Authorization': `Bearer ${adminToken}` }
+      });
+      assert.strictEqual(res.status, 404);
+    });
+  });
 });

@@ -16,7 +16,12 @@ module.exports = [
   reactPlugin.configs.flat.recommended,
 
   // React Hooks flat config
-  reactHooksPlugin.configs.recommended,
+  {
+    plugins: {
+      'react-hooks': reactHooksPlugin,
+    },
+    rules: reactHooksPlugin.configs.recommended.rules,
+  },
 
   {
     files: ['**/*.{js,jsx}'],
@@ -42,9 +47,20 @@ module.exports = [
         localStorage: 'readonly',
         sessionStorage: 'readonly',
         alert: 'readonly',
+        confirm: 'readonly',
+        prompt: 'readonly',
         FormData: 'readonly',
         FileReader: 'readonly',
         Blob: 'readonly',
+        EventSource: 'readonly',
+        AbortController: 'readonly',
+        location: 'readonly',
+        history: 'readonly',
+        btoa: 'readonly',
+        atob: 'readonly',
+        Image: 'readonly',
+        Event: 'readonly',
+        File: 'readonly',
       },
     },
     plugins: {
@@ -53,8 +69,11 @@ module.exports = [
     rules: {
       'react/react-in-jsx-scope': 'off',  // not needed with React 17+
       'react/prop-types': 'off',          // project doesn't use PropTypes
+      'react/no-unescaped-entities': 'off',
+      'no-empty': 'off',
       'no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
-      'prettier/prettier': 'warn',
+      'no-duplicate-imports': 'error',    // prevent duplicate module declarations (#412)
+      'prettier/prettier': 'error',
     },
     settings: {
       react: { version: 'detect' },
