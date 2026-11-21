@@ -11,6 +11,7 @@
     "start": "node src/index.js",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
+    "lint:no-ignore": "eslint src/ --no-ignore",
     "test": "NODE_ENV=test JWT_SECRET=testsecret API_KEY_PEPPER=test-api-key-pepper USDC_ISSUER=GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5 STELLAR_NETWORK=testnet PLATFORM_SECRET_KEY=SCVMQUS5EMTHWBLJTE5XCSCMHB2ZOVKRR4ATVTRPUNRCOGKRENIL3LHR DATABASE_URL=postgresql://postgres:password@localhost:5432/crowdpay STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org WALLET_SECRET_LOCAL_KEK=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= node --test src/**/*.test.js",
     "test:coverage": "NODE_ENV=test JWT_SECRET=testsecret API_KEY_PEPPER=test-api-key-pepper USDC_ISSUER=GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5 STELLAR_NETWORK=testnet PLATFORM_SECRET_KEY=SCVMQUS5EMTHWBLJTE5XCSCMHB2ZOVKRR4ATVTRPUNRCOGKRENIL3LHR DATABASE_URL=postgresql://postgres:password@localhost:5432/crowdpay STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org WALLET_SECRET_LOCAL_KEK=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= c8 --check-coverage --lines 70 --branches 70 --functions 70 --statements 70 --reporter=text --reporter=lcov --reporter=json-summary node --test src/**/*.test.js",
     "migrate": "node db/migrate.js",

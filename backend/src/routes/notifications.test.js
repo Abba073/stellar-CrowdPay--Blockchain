@@ -57,3 +57,15 @@ test('PATCH /:id/read rejects a non-UUID id without a DB round-trip', async () =
   assert.equal(calls.length, 0);
   assert.equal((await request(app).patch(`/api/notifications/${ID}/read`)).status, 200);
 });
+
+test('PATCH /:id/read remains successful when the owned notification is already read', async () => {
+  const { app, calls } = buildApp();
+  const first = await request(app).patch(`/api/notifications/${ID}/read`);
+  const second = await request(app).patch(`/api/notifications/${ID}/read`);
+
+  assert.equal(first.status, 200);
+  assert.deepEqual(second.body, first.body);
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].text, /COALESCE\(read_at, NOW\(\)\)/);
+  assert.doesNotMatch(calls[0].text, /read_at IS NULL/);
+});

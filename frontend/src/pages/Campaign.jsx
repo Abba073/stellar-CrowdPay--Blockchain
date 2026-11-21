@@ -205,7 +205,7 @@ export default function Campaign() {
       .catch(() => setMilestones([]));
     api
       .getCampaignUpdates(id, { limit: 20 })
-      .then(setUpdates)
+      .then((data) => setUpdates(Array.isArray(data) ? data : data?.updates || []))
       .catch(() => setUpdates([]));
     api
       .getCampaignAnalytics(id)
@@ -2794,7 +2794,7 @@ export default function Campaign() {
       .catch(() => setMilestones([]));
     api
       .getCampaignUpdates(id, { limit: 20 })
-      .then(setUpdates)
+      .then((data) => setUpdates(Array.isArray(data) ? data : data?.updates || []))
       .catch(() => setUpdates([]));
     if (user) {
       api

@@ -24,7 +24,8 @@ function hashApiKey(rawKey) {
 
 async function authenticate(req) {
   const header = req.headers.authorization;
-  const token = req.cookies?.cp_token || (header && header.startsWith('Bearer ') ? header.slice(7).trim() : null);
+  const bearerToken = header && header.startsWith('Bearer ') ? header.slice(7).trim() : null;
+  const token = bearerToken || req.cookies?.cp_token;
   if (!token) throw new Error('Missing token');
 
   if (token.startsWith('cp_live_')) {
