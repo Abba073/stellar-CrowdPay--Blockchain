@@ -25,4 +25,12 @@ describe('amounts (frontend fee mirror)', () => {
     expect(netAmount).toBe('0.0000002');
     expect(formatStroops(1n)).toBe('0.0000001');
   });
+
+  it('rejects amounts with more than seven decimals and out-of-range bps', () => {
+    expect(() => parseAmountToStroops('1.12345678')).toThrow(
+      'Invalid amount "1.12345678": expected a decimal number with at most 7 decimal places'
+    );
+    expect(() => calculateFee('100', -1)).toThrow('Invalid fee rate (bps)');
+    expect(() => calculateFee('100', 10001)).toThrow('Invalid fee rate (bps)');
+  });
 });
